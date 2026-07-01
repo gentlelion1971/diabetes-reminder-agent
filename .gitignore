@@ -1,0 +1,22 @@
+cat > .gitignore <<'EOF'
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Secrets
+.env
+
+# Runtime state / private health data
+alert_state.json
+podage.txt
+dexcomage.txt
+
+# Logs
+*.log
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
+EOF

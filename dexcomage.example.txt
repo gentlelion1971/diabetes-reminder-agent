@@ -1,0 +1,3 @@
+2026-06-23T22:15:00-04:00
+# Put latest Dexcom sensor start/change time here.
+# Real file should be named dexcomage.txt and should NOT be committed.
