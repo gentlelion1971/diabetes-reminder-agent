@@ -50,6 +50,13 @@ HIGH_PREDICTED = float(os.environ.get("HIGH_PREDICTED", "220"))
 
 STALE_MINUTES = float(os.environ.get("STALE_MINUTES", "15"))
 
+# Uploader phone battery / Loop health
+UPLOADER_BATTERY_WARN = float(os.environ.get("UPLOADER_BATTERY_WARN", "10"))
+UPLOADER_BATTERY_URGENT = float(os.environ.get("UPLOADER_BATTERY_URGENT", "5"))
+
+DEVICESTATUS_STALE_MINUTES = float(os.environ.get("DEVICESTATUS_STALE_MINUTES", "15"))
+LOOP_STALE_MINUTES = float(os.environ.get("LOOP_STALE_MINUTES", "15"))
+PUMP_CLOCK_STALE_MINUTES = float(os.environ.get("PUMP_CLOCK_STALE_MINUTES", "30"))
 # Pod age / Omnipod age
 POD_WARN_HOURS = float(os.environ.get("POD_WARN_HOURS", "68"))
 POD_EXPIRE_HOURS = float(os.environ.get("POD_EXPIRE_HOURS", "72"))
@@ -985,6 +992,245 @@ def check_pod_insulin_alert(
                 ),
             )
 
+def parse_ns_time_value(value):
+    """
+    Parse a direct timestamp string such as:
+      2026-07-01T11:53:01Z
+    """
+    if not value:
+        return None
+
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+        except Exception:
+            return None
+
+    return None
+
+
+def minutes_old(dt):
+    if not dt:
+        return None
+    return (datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds() / 60
+
+
+def get_latest_devicestatus_info(devicestatus):
+    """
+    Extract freshness/battery/loop/pump status from latest devicestatus.
+    """
+    if not devicestatus:
+        return {
+            "latest_dev": None,
+            "dev_created_at": None,
+            "dev_age_min": None,
+            "uploader_name": None,
+            "uploader_battery": None,
+            "uploader_timestamp": None,
+            "uploader_age_min": None,
+            "loop_timestamp": None,
+            "loop_age_min": None,
+            "pump_clock": None,
+            "pump_clock_age_min": None,
+            "pump_suspended": None,
+            "pump_bolusing": None,
+            "pump_id": None,
+            "pump_model": None,
+        }
+
+    latest_dev = devicestatus[0]
+
+    dev_created_at = parse_ns_time(latest_dev)
+    dev_age_min = minutes_old(dev_created_at)
+
+    uploader = latest_dev.get("uploader", {}) or {}
+    uploader_timestamp = parse_ns_time_value(uploader.get("timestamp"))
+    uploader_age_min = minutes_old(uploader_timestamp)
+    uploader_battery = uploader.get("battery")
+
+    loop = latest_dev.get("loop", {}) or {}
+    loop_timestamp = parse_ns_time_value(loop.get("timestamp"))
+    loop_age_min = minutes_old(loop_timestamp)
+
+    pump = latest_dev.get("pump", {}) or {}
+    pump_clock = parse_ns_time_value(pump.get("clock"))
+    pump_clock_age_min = minutes_old(pump_clock)
+
+    return {
+        "latest_dev": latest_dev,
+        "dev_created_at": dev_created_at,
+        "dev_age_min": dev_age_min,
+        "uploader_name": uploader.get("name"),
+        "uploader_battery": uploader_battery,
+        "uploader_timestamp": uploader_timestamp,
+        "uploader_age_min": uploader_age_min,
+        "loop_timestamp": loop_timestamp,
+        "loop_age_min": loop_age_min,
+        "pump_clock": pump_clock,
+        "pump_clock_age_min": pump_clock_age_min,
+        "pump_suspended": pump.get("suspended"),
+        "pump_bolusing": pump.get("bolusing"),
+        "pump_id": pump.get("pumpID"),
+        "pump_model": pump.get("model"),
+    }
+
+
+def check_loop_and_device_health(state, dev_info, latest_cgm_time):
+    """
+    Monitor:
+    - Nightscout devicestatus stale
+    - Loop stopped / stale
+    - uploader phone battery low
+    - pump clock stale
+    - pump suspended
+    """
+
+    dev_age = dev_info.get("dev_age_min")
+    loop_age = dev_info.get("loop_age_min")
+    uploader_age = dev_info.get("uploader_age_min")
+    pump_clock_age = dev_info.get("pump_clock_age_min")
+    uploader_battery = dev_info.get("uploader_battery")
+    pump_suspended = dev_info.get("pump_suspended")
+
+    # 1. No devicestatus / devicestatus stale
+    if dev_age is None:
+        if can_send(state, "devicestatus_missing", 30):
+            alert_parent(
+                "Julie Nightscout devicestatus missing",
+                (
+                    f"Nightscout returned no usable devicestatus.\n\n"
+                    f"CGM last update: {fmt_local(latest_cgm_time)}\n"
+                    f"Nightscout: {NS_URL}\n\n"
+                    f"Please check Loop/Nightscout uploader."
+                ),
+            )
+    elif dev_age > DEVICESTATUS_STALE_MINUTES:
+        if can_send(state, "devicestatus_stale", 30):
+            alert_both(
+                "Julie Loop/Nightscout status may be stale",
+                (
+                    f"Julie, Loop/Nightscout status may not be updating.\n\n"
+                    f"Last Loop status upload: {fmt_local(dev_info.get('dev_created_at'))}\n"
+                    f"Age: {dev_age:.0f} minutes\n\n"
+                    f"Please check Loop app, phone internet, and Nightscout upload."
+                ),
+                (
+                    f"Julie devicestatus stale.\n"
+                    f"Last devicestatus: {fmt_local(dev_info.get('dev_created_at'))}\n"
+                    f"Age: {dev_age:.1f} minutes\n"
+                    f"Uploader: {dev_info.get('uploader_name')}\n"
+                    f"Uploader battery: {uploader_battery}\n"
+                    f"Loop timestamp: {fmt_local(dev_info.get('loop_timestamp'))}\n"
+                    f"Pump clock: {fmt_local(dev_info.get('pump_clock'))}\n"
+                    f"Nightscout: {NS_URL}"
+                ),
+            )
+
+    # 2. Loop stale
+    if loop_age is None:
+        if can_send(state, "loop_timestamp_missing", 30):
+            alert_parent(
+                "Julie Loop timestamp missing",
+                (
+                    f"Latest devicestatus does not include loop.timestamp.\n\n"
+                    f"This may mean Loop data is not uploading correctly.\n"
+                    f"Nightscout: {NS_URL}"
+                ),
+            )
+    elif loop_age > LOOP_STALE_MINUTES:
+        if can_send(state, "loop_stale", 20):
+            alert_both(
+                "Julie Loop may have stopped updating",
+                (
+                    f"Julie, Loop may not be updating.\n\n"
+                    f"Last Loop timestamp: {fmt_local(dev_info.get('loop_timestamp'))}\n"
+                    f"Age: {loop_age:.0f} minutes\n\n"
+                    f"Please open Loop and check that it is running."
+                ),
+                (
+                    f"Julie Loop stale alert.\n"
+                    f"Last Loop timestamp: {fmt_local(dev_info.get('loop_timestamp'))}\n"
+                    f"Loop age: {loop_age:.1f} minutes\n"
+                    f"Devicestatus age: {dev_age}\n"
+                    f"Uploader battery: {uploader_battery}\n"
+                    f"Nightscout: {NS_URL}"
+                ),
+            )
+
+    # 3. Uploader battery low
+    if isinstance(uploader_battery, (int, float)):
+        if uploader_battery <= UPLOADER_BATTERY_URGENT:
+            if can_send(state, "uploader_battery_urgent", 60):
+                alert_both(
+                    f"Julie phone battery very low: {uploader_battery:.0f}%",
+                    (
+                        f"Julie, your Loop uploader phone battery appears very low: {uploader_battery:.0f}%.\n\n"
+                        f"Please charge it so Dexcom/Loop/Nightscout can keep working."
+                    ),
+                    (
+                        f"Julie uploader battery urgent.\n"
+                        f"Battery: {uploader_battery:.0f}%\n"
+                        f"Uploader timestamp: {fmt_local(dev_info.get('uploader_timestamp'))}\n"
+                        f"Uploader age: {uploader_age}\n"
+                        f"Nightscout: {NS_URL}"
+                    ),
+                )
+
+        elif uploader_battery <= UPLOADER_BATTERY_WARN:
+            if can_send(state, "uploader_battery_warn", 180):
+                alert_both(
+                    f"Julie phone battery low: {uploader_battery:.0f}%",
+                    (
+                        f"Julie, your Loop uploader phone battery is low: {uploader_battery:.0f}%.\n\n"
+                        f"Please charge it when convenient."
+                    ),
+                    (
+                        f"Julie uploader battery low.\n"
+                        f"Battery: {uploader_battery:.0f}%\n"
+                        f"Uploader timestamp: {fmt_local(dev_info.get('uploader_timestamp'))}\n"
+                        f"Nightscout: {NS_URL}"
+                    ),
+                )
+
+    # 4. Pump clock stale / pump communication may be stale
+    if pump_clock_age is not None and pump_clock_age > PUMP_CLOCK_STALE_MINUTES:
+        if can_send(state, "pump_clock_stale", 30):
+            alert_both(
+                "Julie pump communication may be stale",
+                (
+                    f"Julie, pump communication may be stale.\n\n"
+                    f"Last pump clock: {fmt_local(dev_info.get('pump_clock'))}\n"
+                    f"Age: {pump_clock_age:.0f} minutes\n\n"
+                    f"Please check Loop/Pod communication."
+                ),
+                (
+                    f"Julie pump clock stale.\n"
+                    f"Pump clock: {fmt_local(dev_info.get('pump_clock'))}\n"
+                    f"Pump clock age: {pump_clock_age:.1f} minutes\n"
+                    f"Pump model: {dev_info.get('pump_model')}\n"
+                    f"Pump ID: {dev_info.get('pump_id')}\n"
+                    f"Nightscout: {NS_URL}"
+                ),
+            )
+
+    # 5. Pump suspended
+    if pump_suspended is True:
+        if can_send(state, "pump_suspended", 15):
+            alert_both(
+                "URGENT: Julie pump appears suspended",
+                (
+                    f"Julie, Nightscout shows the pump may be suspended.\n\n"
+                    f"Please check Loop/Pod immediately."
+                ),
+                (
+                    f"Julie pump suspended alert.\n"
+                    f"Pump suspended: {pump_suspended}\n"
+                    f"Pump model: {dev_info.get('pump_model')}\n"
+                    f"Pump ID: {dev_info.get('pump_id')}\n"
+                    f"Pump clock: {fmt_local(dev_info.get('pump_clock'))}\n"
+                    f"Nightscout: {NS_URL}"
+                ),
+            )
 
 # ============================================================
 # Main
@@ -1088,7 +1334,7 @@ def main():
                     f"Julie, Nightscout/Dexcom data may be stale.\n\n"
                     f"Last CGM update: {fmt_local(latest_time)}\n"
                     f"Age: {age_min} minutes\n\n"
-                    f"Please check Dexcom/Loop connection."
+		    f"Please check Dexcom, Bluetooth, Loop, and Nightscout upload."
                 ),
                 (
                     f"Julie Nightscout data may be stale.\n"
@@ -1100,6 +1346,13 @@ def main():
         save_alert_state(state)
         return
 
+    # ------------------------------------------------------------
+    # Loop / phone battery / pump health monitor
+    # ------------------------------------------------------------
+
+    dev_info = get_latest_devicestatus_info(devicestatus)
+    check_loop_and_device_health(state, dev_info, latest_time)
+    
     # ------------------------------------------------------------
     # Loop prediction / IOB / COB
     # ------------------------------------------------------------
@@ -1329,7 +1582,16 @@ def main():
     print(f"Estimated remaining insulin: {estimated_remaining}")
     print(f"Insulin left used by alert logic: {insulin_left}")
     print(f"Insulin source: {insulin_source}")
-
+    print(f"Devicestatus age: {dev_info.get('dev_age_min')}")
+    print(f"Uploader: {dev_info.get('uploader_name')}")
+    print(f"Uploader battery: {dev_info.get('uploader_battery')}")
+    print(f"Uploader age: {dev_info.get('uploader_age_min')}")
+    print(f"Loop timestamp: {fmt_local(dev_info.get('loop_timestamp')) if dev_info.get('loop_timestamp') else None}")
+    print(f"Loop age: {dev_info.get('loop_age_min')}")
+    print(f"Pump clock: {fmt_local(dev_info.get('pump_clock')) if dev_info.get('pump_clock') else None}")
+    print(f"Pump clock age: {dev_info.get('pump_clock_age_min')}")
+    print(f"Pump suspended: {dev_info.get('pump_suspended')}")
+    print(f"Pump bolusing: {dev_info.get('pump_bolusing')}")
 
 if __name__ == "__main__":
     try:
