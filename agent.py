@@ -26,15 +26,26 @@ EMAIL_PORT = int(os.environ.get("EMAIL_PORT", "465"))
 EMAIL_USER = os.environ["EMAIL_USER"]
 EMAIL_APP_PASSWORD = os.environ["EMAIL_APP_PASSWORD"]
 
-PATIENT_EMAIL = os.environ["PATIENT_EMAIL"]
-PARENT_EMAIL = os.environ["PARENT_EMAIL"]
+PATIENT_NAME = os.environ.get("PATIENT_NAME", "Patient").strip() or "Patient"
+
+# Backward compatibility:
+# - New generic config uses PATIENT_EMAIL / PATIENT_TEXT_EMAIL.
+# - Older private installs may still have JULIE_EMAIL / JULIE_TEXT_EMAIL.
+PATIENT_EMAIL = os.environ.get("PATIENT_EMAIL", os.environ.get("JULIE_EMAIL", "")).strip()
+PARENT_EMAIL = os.environ["PARENT_EMAIL"].strip()
+
+if not PATIENT_EMAIL:
+    raise RuntimeError("Missing PATIENT_EMAIL in .env")
 
 DRY_RUN = os.environ.get("DRY_RUN", "true").strip().lower() in {"1", "true", "yes", "y"}
 LOCAL_TZ = ZoneInfo(os.environ.get("TIMEZONE", "America/New_York"))
 
 # Optional Verizon email-to-text
 ENABLE_TEXT = os.environ.get("ENABLE_TEXT", "false").strip().lower() in {"1", "true", "yes", "y"}
-PATIENT_TEXT_EMAIL = os.environ.get("PATIENT_TEXT_EMAIL", "").strip()
+PATIENT_TEXT_EMAIL = os.environ.get(
+    "PATIENT_TEXT_EMAIL",
+    os.environ.get("JULIE_TEXT_EMAIL", ""),
+).strip()
 PARENT_TEXT_EMAIL = os.environ.get("PARENT_TEXT_EMAIL", "").strip()
 TEXT_MAX_CHARS = int(os.environ.get("TEXT_MAX_CHARS", "150"))
 
@@ -88,6 +99,30 @@ MISSING_BOLUS_MIN_RISE = float(os.environ.get("MISSING_BOLUS_MIN_RISE", "30"))
 MISSING_BOLUS_MIN_SLOPE = float(os.environ.get("MISSING_BOLUS_MIN_SLOPE", "0.30"))
 MISSING_BOLUS_MIN_DURATION = float(os.environ.get("MISSING_BOLUS_MIN_DURATION", "30"))
 MISSING_BOLUS_MIN_POINTS = int(os.environ.get("MISSING_BOLUS_MIN_POINTS", "6"))
+
+# Post-meal rising / possible undercounted carbs
+# Conservative default:
+#   alert only when post-meal BG is already high, predicted to stay/go high,
+#   and the most recent CGM step is still rising quickly.
+POST_MEAL_RISE_ENABLE = os.environ.get("POST_MEAL_RISE_ENABLE", "true").strip().lower() in {"1", "true", "yes", "y"}
+POST_MEAL_LOOKBACK_MIN = float(os.environ.get("POST_MEAL_LOOKBACK_MIN", "90"))
+POST_MEAL_MIN_CURRENT_BG = float(os.environ.get("POST_MEAL_MIN_CURRENT_BG", "220"))
+POST_MEAL_MIN_RISE = float(os.environ.get("POST_MEAL_MIN_RISE", "50"))
+POST_MEAL_MIN_SLOPE = float(os.environ.get("POST_MEAL_MIN_SLOPE", "0.50"))
+POST_MEAL_MIN_DURATION = float(os.environ.get("POST_MEAL_MIN_DURATION", "30"))
+POST_MEAL_MIN_POINTS = int(os.environ.get("POST_MEAL_MIN_POINTS", "6"))
+POST_MEAL_MIN_COB = float(os.environ.get("POST_MEAL_MIN_COB", "10"))
+POST_MEAL_MIN_IOB = float(os.environ.get("POST_MEAL_MIN_IOB", "0.5"))
+POST_MEAL_PREDICTED_HIGH = float(os.environ.get("POST_MEAL_PREDICTED_HIGH", "220"))
+POST_MEAL_REQUIRE_PREDICTED_HIGH = os.environ.get(
+    "POST_MEAL_REQUIRE_PREDICTED_HIGH", "true"
+).strip().lower() in {"1", "true", "yes", "y"}
+POST_MEAL_REQUIRE_RECENT_RISING = os.environ.get(
+    "POST_MEAL_REQUIRE_RECENT_RISING", "true"
+).strip().lower() in {"1", "true", "yes", "y"}
+POST_MEAL_LAST_STEP_MAX_MIN = float(os.environ.get("POST_MEAL_LAST_STEP_MAX_MIN", "12"))
+POST_MEAL_MIN_LAST_5MIN_RISE = float(os.environ.get("POST_MEAL_MIN_LAST_5MIN_RISE", "10"))
+POST_MEAL_COOLDOWN_MIN = float(os.environ.get("POST_MEAL_COOLDOWN_MIN", "60"))
 
 
 # ============================================================
@@ -895,13 +930,13 @@ def check_loop_and_device_health(state, dev_info, latest_cgm_time):
     if dev_info.get("no_pod_detected"):
         if can_send(state, "pump_no_pod", 10):
             alert_both(
-                "URGENT: Julie pump shows No Pod",
+                f"URGENT: {PATIENT_NAME} pump shows No Pod",
                 (
-                    f"Julie, Loop/Nightscout shows No Pod or no pod paired.\n\n"
+                    f"{PATIENT_NAME}, Loop/Nightscout shows No Pod or no pod paired.\n\n"
                     f"Please check Loop and Pod immediately."
                 ),
                 (
-                    f"Julie urgent pump/pod alert.\n\n"
+                    f"{PATIENT_NAME} urgent pump/pod alert.\n\n"
                     f"Nightscout/Loop reports No Pod or no pod paired.\n\n"
                     f"reservoir_display_override: {dev_info.get('reservoir_display_override')}\n"
                     f"reservoir_level_override: {dev_info.get('reservoir_level_override')}\n"
@@ -919,63 +954,48 @@ def check_loop_and_device_health(state, dev_info, latest_cgm_time):
 
 def extract_reservoir_units(devicestatus, status):
     """
-    Try to find exact pump reservoir / remaining insulin.
+    Return exact pump reservoir only from latest devicestatus[0].
 
-    Current Nightscout data may not expose this field.
-    Do not use status.extendedSettings.pump.warnRes or urgentRes;
-    those are alert thresholds, not actual remaining insulin.
+    Do not scan old devicestatus records. Old pod / No Pod / Pod Error
+    records can remain in devicestatus[1], [2], etc. and create false
+    reservoir readings.
+
+    If latest devicestatus has pump.reservoir = null, return None and let
+    the script estimate remaining insulin from podage.txt + treatments.
     """
-    reservoir_keys = {
-        "reservoir",
-        "pumpReservoir",
-        "pump_reservoir",
-        "remainingInsulin",
-        "remaining_insulin",
-        "insulinRemaining",
-        "insulin_remaining",
-        "reservoirRemaining",
-        "reservoir_remaining",
-        "remainingReservoir",
-        "remaining_reservoir",
-    }
+    latest_dev = None
 
-    candidates = []
+    if isinstance(devicestatus, list) and devicestatus:
+        latest_dev = devicestatus[0]
+    elif isinstance(devicestatus, dict):
+        latest_dev = devicestatus
 
-    for source_name, source in [("devicestatus", devicestatus), ("status", status)]:
-        for path, key, value in walk_json(source):
-            path_lower = path.lower()
-
-            # Avoid Nightscout settings thresholds.
-            if "extendedsettings" in path_lower:
-                continue
-
-            if key in reservoir_keys:
-                number = parse_float(value)
-                if number is not None and 0 <= number <= 300:
-                    candidates.append((source_name, path, number))
-
-            if "reservoir" in path_lower and "iob" not in path_lower:
-                number = parse_float(value)
-                if number is not None and 0 <= number <= 300:
-                    candidates.append((source_name, path, number))
-
-            if "remaining" in path_lower and "insulin" in path_lower:
-                number = parse_float(value)
-                if number is not None and 0 <= number <= 300:
-                    candidates.append((source_name, path, number))
-
-    if not candidates:
+    if not latest_dev:
         return None, None
 
-    candidates.sort(key=lambda x: (
-        0 if x[0] == "devicestatus" else 1,
-        0 if "pump" in x[1].lower() else 1,
-        len(x[1]),
-    ))
+    pump = latest_dev.get("pump", {}) or {}
+    loop = latest_dev.get("loop", {}) or {}
 
-    source_name, path, units = candidates[0]
-    return units, f"{source_name}:{path}"
+    reservoir_display_override = str(pump.get("reservoir_display_override", "") or "").lower()
+    loop_failure_reason = str(loop.get("failureReason", "") or "").lower()
+    pump_id = str(pump.get("pumpID", "") or "").lower()
 
+    # If latest record says No Pod / Pod Error, do not trust reservoir.
+    if (
+        "no pod" in reservoir_display_override
+        or "pod error" in reservoir_display_override
+        or "no pod paired" in loop_failure_reason
+        or "no active pod" in loop_failure_reason
+        or (pump_id == "unknown" and "no pod" in reservoir_display_override)
+    ):
+        return None, "ignored latest devicestatus because pod status is invalid"
+
+    reservoir = pump.get("reservoir")
+
+    if isinstance(reservoir, (int, float)) and 0 <= float(reservoir) <= 300:
+        return float(reservoir), "latest_devicestatus:pump.reservoir"
+
+    return None, None
 
 # ============================================================
 # Delivered insulin estimate
@@ -1048,8 +1068,9 @@ def get_recent_carb_and_bolus_summary(treatments, reference_time, lookback_min=6
     Summarize recent carb / meaningful bolus events.
 
     Important:
-    - Ignore automatic Temp Basal.
-    - Ignore tiny automatic Loop insulin events unless they are meaningful.
+    - Ignore automatic Temp Basal as a meal bolus.
+    - Track automatic insulin separately for debug.
+    - Return totals so both missing-carb and post-meal detectors can use the same treatment scan.
     """
     end_time = reference_time.astimezone(timezone.utc)
     start_time = end_time - timedelta(minutes=lookback_min)
@@ -1058,25 +1079,30 @@ def get_recent_carb_and_bolus_summary(treatments, reference_time, lookback_min=6
     meaningful_bolus_events = []
     automatic_insulin_events = []
 
+    total_carbs_g = 0.0
+    meaningful_bolus_units = 0.0
+    automatic_insulin_units = 0.0
+
     for tr in treatments:
         if not treatment_in_window(tr, start_time, end_time):
             continue
 
         event_type = str(tr.get("eventType", "")).lower()
-        entered_by = str(tr.get("enteredBy", "")).lower()
         automatic = bool(tr.get("automatic", False))
 
-        carbs = tr.get("carbs")
-        insulin = tr.get("insulin")
-        amount = tr.get("amount")
+        carbs = parse_float(tr.get("carbs"))
+        insulin = parse_float(tr.get("insulin"))
+        amount = parse_float(tr.get("amount"))
 
-        if isinstance(carbs, (int, float)) and carbs >= 5:
+        if carbs is not None and carbs >= 5:
             carb_events.append(tr)
+            total_carbs_g += carbs
 
-        # Ignore temp basal for missed meal/carb detection.
+        # Ignore temp basal for meal/carb detection.
         if "temp basal" in event_type:
-            if isinstance(amount, (int, float)) and amount > 0:
+            if amount is not None and amount > 0:
                 automatic_insulin_events.append(tr)
+                automatic_insulin_units += amount
             continue
 
         is_meaningful = False
@@ -1086,30 +1112,35 @@ def get_recent_carb_and_bolus_summary(treatments, reference_time, lookback_min=6
         elif "carb correction" in event_type:
             is_meaningful = True
         elif "correction bolus" in event_type:
-            # Tiny automatic corrections should not hide missed meal/carb alerts.
+            # Only manual correction suppresses missing meal/carb.
+            # Automatic Loop corrections are tracked separately.
             if not automatic:
-                is_meaningful = True
-            elif isinstance(insulin, (int, float)) and insulin >= 0.5:
                 is_meaningful = True
         elif "bolus" in event_type and not automatic:
             is_meaningful = True
-        elif isinstance(insulin, (int, float)) and insulin >= 0.5 and not automatic:
+        elif insulin is not None and insulin >= 0.5 and not automatic:
             is_meaningful = True
 
         if is_meaningful:
             meaningful_bolus_events.append(tr)
+            if insulin is not None and insulin > 0:
+                meaningful_bolus_units += insulin
         else:
-            if isinstance(insulin, (int, float)) and insulin > 0:
+            if insulin is not None and insulin > 0:
                 automatic_insulin_events.append(tr)
-            elif isinstance(amount, (int, float)) and amount > 0:
+                automatic_insulin_units += insulin
+            elif amount is not None and amount > 0:
                 automatic_insulin_events.append(tr)
+                automatic_insulin_units += amount
 
     return {
         "carb_events": carb_events,
         "meaningful_bolus_events": meaningful_bolus_events,
         "automatic_insulin_events": automatic_insulin_events,
+        "total_carbs_g": total_carbs_g,
+        "meaningful_bolus_units": meaningful_bolus_units,
+        "automatic_insulin_units": automatic_insulin_units,
     }
-
 
 def linear_regression_slope(points):
     """
@@ -1259,6 +1290,192 @@ def detect_missing_bolus(entries, treatments, reference_time, cob=None):
         "carb_count": carb_count,
         "meaningful_bolus_count": meaningful_bolus_count,
         "automatic_insulin_count": automatic_insulin_count,
+    }
+
+
+def detect_post_meal_rising(
+    entries,
+    treatments,
+    reference_time,
+    cob=None,
+    iob=None,
+    max_predicted_high=None,
+):
+    """
+    Detect possible undercounted carbs / post-meal rising.
+
+    This is different from missing carb/bolus:
+    - Missing detector: no carbs and no meaningful bolus.
+    - Post-meal detector: carbs/COB/bolus exist, but BG still rises significantly.
+
+    This function only triggers a reminder to check Loop, food entry, pod/site, etc.
+    It does not recommend an insulin dose.
+    """
+    if not POST_MEAL_RISE_ENABLE:
+        return None
+
+    end_time = reference_time.astimezone(timezone.utc)
+    start_time = end_time - timedelta(minutes=POST_MEAL_LOOKBACK_MIN)
+
+    points = []
+
+    for e in entries:
+        t = parse_ns_time(e)
+        sgv = e.get("sgv")
+
+        if not t or not isinstance(sgv, (int, float)):
+            continue
+
+        t = t.astimezone(timezone.utc)
+        if start_time <= t <= end_time:
+            points.append((t, float(sgv)))
+
+    points.sort(key=lambda x: x[0])
+
+    if len(points) < POST_MEAL_MIN_POINTS:
+        print(f"Post-meal debug: no alert; not enough CGM points: {len(points)}")
+        return None
+
+    duration_min = (points[-1][0] - points[0][0]).total_seconds() / 60
+
+    if duration_min < POST_MEAL_MIN_DURATION:
+        print(f"Post-meal debug: no alert; duration too short: {duration_min:.1f} min")
+        return None
+
+    start_bg = points[0][1]
+    current_bg = points[-1][1]
+    net_rise = current_bg - start_bg
+    slope = linear_regression_slope(points)
+    consistency = rise_consistency_score(points)
+
+    last_5min_rise = None
+    last_step_minutes = None
+
+    if len(points) >= 2:
+        prev_time, prev_bg = points[-2]
+        last_time, last_bg = points[-1]
+        last_step_minutes = (last_time - prev_time).total_seconds() / 60
+
+        if 0 < last_step_minutes <= POST_MEAL_LAST_STEP_MAX_MIN:
+            # Normalize the most recent CGM step to mg/dL per 5 minutes.
+            last_5min_rise = (last_bg - prev_bg) * (5.0 / last_step_minutes)
+
+    summary = get_recent_carb_and_bolus_summary(
+        treatments,
+        reference_time,
+        lookback_min=POST_MEAL_LOOKBACK_MIN,
+    )
+
+    carb_count = len(summary["carb_events"])
+    meaningful_bolus_count = len(summary["meaningful_bolus_events"])
+    automatic_insulin_count = len(summary["automatic_insulin_events"])
+
+    total_carbs_g = summary["total_carbs_g"]
+    meaningful_bolus_units = summary["meaningful_bolus_units"]
+    automatic_insulin_units = summary["automatic_insulin_units"]
+
+    cob_value = cob if isinstance(cob, (int, float)) else 0
+    iob_value = iob if isinstance(iob, (int, float)) else 0
+    predicted_value = max_predicted_high if isinstance(max_predicted_high, (int, float)) else None
+
+    has_meal_evidence = (
+        cob_value >= POST_MEAL_MIN_COB
+        or total_carbs_g >= POST_MEAL_MIN_COB
+        or carb_count > 0
+    )
+
+    has_insulin_evidence = (
+        meaningful_bolus_count > 0
+        or meaningful_bolus_units > 0
+        or iob_value >= POST_MEAL_MIN_IOB
+    )
+
+    current_high_enough = current_bg >= POST_MEAL_MIN_CURRENT_BG
+    predicted_high_enough = (
+        predicted_value is not None
+        and predicted_value >= POST_MEAL_PREDICTED_HIGH
+    )
+
+    if POST_MEAL_REQUIRE_PREDICTED_HIGH:
+        high_or_predicted_high = current_high_enough and predicted_high_enough
+    else:
+        high_or_predicted_high = current_high_enough or predicted_high_enough
+
+    print(
+        "Post-meal debug: "
+        f"start_bg={start_bg:.0f}, current_bg={current_bg:.0f}, "
+        f"net_rise={net_rise:.0f}, duration={duration_min:.0f}min, "
+        f"slope={slope:.2f}, consistency={consistency:.2f}, "
+        f"last_5min_rise={last_5min_rise}, "
+        f"COB={cob}, IOB={iob}, predicted_high={predicted_value}, "
+        f"carbs_g={total_carbs_g:.1f}, carb_events={carb_count}, "
+        f"meaningful_bolus={meaningful_bolus_count}, "
+        f"meaningful_bolus_units={meaningful_bolus_units:.2f}, "
+        f"automatic_insulin_events={automatic_insulin_count}, "
+        f"automatic_insulin_units={automatic_insulin_units:.2f}"
+    )
+
+    if not has_meal_evidence:
+        print("Post-meal debug: no alert; no meal/carb/COB evidence")
+        return None
+
+    if not has_insulin_evidence:
+        print("Post-meal debug: no alert; no bolus/IOB evidence")
+        return None
+
+    if net_rise < POST_MEAL_MIN_RISE:
+        print("Post-meal debug: no alert; net rise below threshold")
+        return None
+
+    if slope < POST_MEAL_MIN_SLOPE:
+        print("Post-meal debug: no alert; slope below threshold")
+        return None
+
+    if consistency < 0.70:
+        print("Post-meal debug: no alert; rise not consistent enough")
+        return None
+
+    if not high_or_predicted_high:
+        if POST_MEAL_REQUIRE_PREDICTED_HIGH:
+            print(
+                "Post-meal debug: no alert; current BG and predicted high thresholds "
+                "were not both met"
+            )
+        else:
+            print("Post-meal debug: no alert; not high enough and predicted high not high enough")
+        return None
+
+    if POST_MEAL_REQUIRE_RECENT_RISING:
+        if last_5min_rise is None:
+            print("Post-meal debug: no alert; cannot calculate recent 5-min rise")
+            return None
+
+        if last_5min_rise < POST_MEAL_MIN_LAST_5MIN_RISE:
+            print(
+                "Post-meal debug: no alert; recent rise below threshold "
+                f"({last_5min_rise:.1f} mg/dL per 5 min)"
+            )
+            return None
+
+    return {
+        "start_bg": start_bg,
+        "current_bg": current_bg,
+        "net_rise": net_rise,
+        "duration_min": duration_min,
+        "slope": slope,
+        "consistency": consistency,
+        "points": len(points),
+        "cob": cob_value,
+        "iob": iob_value,
+        "predicted_high": predicted_value,
+        "last_5min_rise": last_5min_rise,
+        "last_step_minutes": last_step_minutes,
+        "carb_count": carb_count,
+        "total_carbs_g": total_carbs_g,
+        "meaningful_bolus_count": meaningful_bolus_count,
+        "meaningful_bolus_units": meaningful_bolus_units,
+        "automatic_insulin_count": automatic_insulin_count,
+        "automatic_insulin_units": automatic_insulin_units,
     }
 
 
@@ -1741,6 +1958,56 @@ def main():
                     f"Automatic insulin events ignored: {missing['automatic_insulin_count']}\n"
                     f"IOB: {iob}\n"
                     f"COB: {cob}\n"
+                    f"Nightscout: {NS_URL}"
+                ),
+            )
+
+    # ------------------------------------------------------------
+    # 6. Post-meal rising / possible undercounted carbs
+    # ------------------------------------------------------------
+
+    post_meal = detect_post_meal_rising(
+        entries=entries,
+        treatments=treatments,
+        reference_time=latest_time,
+        cob=cob,
+        iob=iob,
+        max_predicted_high=max_pred_90,
+    )
+
+    if post_meal:
+        if can_send(state, "post_meal_rising_possible_undercount", POST_MEAL_COOLDOWN_MIN):
+            subject = f"{PATIENT_NAME} post-meal BG rising"
+
+            alert_both(
+                subject,
+                (
+                    f"{PATIENT_NAME}, your BG is rising after recorded carbs/bolus.\n\n"
+                    f"Start BG: {post_meal['start_bg']:.0f}\n"
+                    f"Current BG: {post_meal['current_bg']:.0f} {direction}\n"
+                    f"Rise: +{post_meal['net_rise']:.0f} mg/dL over {post_meal['duration_min']:.0f} min\n"
+                    f"COB: {post_meal['cob']:.1f}g\n"
+                    f"IOB: {post_meal['iob']:.2f}U\n\n"
+                    f"Please check Loop, pod/site, and whether carbs were entered correctly if needed."
+                ),
+                (
+                    f"{subject}\n"
+                    f"Reason: BG rising after carbs/bolus are already recorded.\n\n"
+                    f"Start BG: {post_meal['start_bg']:.0f}\n"
+                    f"Current BG: {post_meal['current_bg']:.0f} {direction}\n"
+                    f"Rise: +{post_meal['net_rise']:.0f} mg/dL\n"
+                    f"Duration: {post_meal['duration_min']:.0f} min\n"
+                    f"Slope: {post_meal['slope']:.2f} mg/dL/min\n"
+                    f"Consistency: {post_meal['consistency']:.2f}\n"
+                    f"COB: {post_meal['cob']:.1f}g\n"
+                    f"IOB: {post_meal['iob']:.2f}U\n"
+                    f"Recent carbs entered: {post_meal['total_carbs_g']:.1f}g\n"
+                    f"Meaningful bolus events: {post_meal['meaningful_bolus_count']}\n"
+                    f"Meaningful bolus units: {post_meal['meaningful_bolus_units']:.2f}U\n"
+                    f"Automatic insulin events ignored: {post_meal['automatic_insulin_count']}\n"
+                    f"Automatic insulin units ignored: {post_meal['automatic_insulin_units']:.2f}U\n"
+                    f"Predicted high: {post_meal['predicted_high']}\n"
+                    f"Recent rise: {post_meal['last_5min_rise']} mg/dL per 5 min\n"
                     f"Nightscout: {NS_URL}"
                 ),
             )
