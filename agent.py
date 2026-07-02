@@ -26,7 +26,7 @@ EMAIL_PORT = int(os.environ.get("EMAIL_PORT", "465"))
 EMAIL_USER = os.environ["EMAIL_USER"]
 EMAIL_APP_PASSWORD = os.environ["EMAIL_APP_PASSWORD"]
 
-JULIE_EMAIL = os.environ["JULIE_EMAIL"]
+PATIENT_EMAIL = os.environ["PATIENT_EMAIL"]
 PARENT_EMAIL = os.environ["PARENT_EMAIL"]
 
 DRY_RUN = os.environ.get("DRY_RUN", "true").strip().lower() in {"1", "true", "yes", "y"}
@@ -34,7 +34,7 @@ LOCAL_TZ = ZoneInfo(os.environ.get("TIMEZONE", "America/New_York"))
 
 # Optional Verizon email-to-text
 ENABLE_TEXT = os.environ.get("ENABLE_TEXT", "false").strip().lower() in {"1", "true", "yes", "y"}
-JULIE_TEXT_EMAIL = os.environ.get("JULIE_TEXT_EMAIL", "").strip()
+PATIENT_TEXT_EMAIL = os.environ.get("PATIENT_TEXT_EMAIL", "").strip()
 PARENT_TEXT_EMAIL = os.environ.get("PARENT_TEXT_EMAIL", "").strip()
 TEXT_MAX_CHARS = int(os.environ.get("TEXT_MAX_CHARS", "150"))
 
@@ -238,9 +238,9 @@ def send_text_email(to_text_email, subject, body):
             smtp.send_message(msg)
 
 
-def alert_julie(subject, body):
-    send_email(JULIE_EMAIL, subject, body)
-    send_text_email(JULIE_TEXT_EMAIL, subject, body)
+def alert_patient(subject, body):
+    send_email(PATIENT_EMAIL, subject, body)
+    send_text_email(PATIENT_TEXT_EMAIL, subject, body)
 
 
 def alert_parent(subject, body):
@@ -248,9 +248,9 @@ def alert_parent(subject, body):
     send_text_email(PARENT_TEXT_EMAIL, subject, body)
 
 
-def alert_both(subject, julie_body, parent_body=None):
-    alert_julie(subject, julie_body)
-    alert_parent(subject, parent_body or julie_body)
+def alert_both(subject, patient_body, parent_body=None):
+    alert_patient(subject, patient_body)
+    alert_parent(subject, parent_body or patient_body)
 
 
 # ============================================================
@@ -431,7 +431,7 @@ def is_pod_change_event(treatment):
 
 def is_dexcom_change_event(treatment):
     """
-    Julie's current Nightscout output did not show Sensor Change events,
+    Current Nightscout output may not show Sensor Change events,
     but this is kept in case Loop/Nightscout starts uploading them later.
     """
     event_type = str(treatment.get("eventType", "")).lower()
@@ -493,7 +493,7 @@ def sync_age_file_from_nightscout(state, file_path, latest_ns_time, device_name,
 
             if can_send(state, f"{cooldown_key}_recovered_file", 720):
                 alert_parent(
-                    f"Julie {device_name} age file recovered",
+                    f"Patient {device_name} age file recovered",
                     (
                         f"{file_path.name} was missing or invalid:\n"
                         f"{local_error}\n\n"
@@ -506,7 +506,7 @@ def sync_age_file_from_nightscout(state, file_path, latest_ns_time, device_name,
 
         if can_send(state, f"{cooldown_key}_missing_file", 720):
             alert_parent(
-                f"Julie {device_name} age file problem",
+                f"Patient {device_name} age file problem",
                 (
                     f"{file_path.name} is missing or invalid:\n"
                     f"{local_error}\n\n"
@@ -529,7 +529,7 @@ def sync_age_file_from_nightscout(state, file_path, latest_ns_time, device_name,
 
         if can_send(state, f"{cooldown_key}_auto_updated", 360):
             alert_parent(
-                f"Julie {device_name} age file auto-updated",
+                f"Patient {device_name} age file auto-updated",
                 (
                     f"I found a newer {device_name} change event in Nightscout.\n\n"
                     f"Old local time: {fmt_local(local_time)}\n"
@@ -545,14 +545,14 @@ def sync_age_file_from_nightscout(state, file_path, latest_ns_time, device_name,
 
 
 def check_age_file_staleness(
-    state,
-    device_name,
-    file_path,
-    start_time,
-    age_hours,
-    stale_hours,
-    cooldown_key,
-    latest_ns_time=None,
+        state,
+        device_name,
+        file_path,
+        start_time,
+        age_hours,
+        stale_hours,
+        cooldown_key,
+        latest_ns_time=None,
 ):
     if start_time is None or age_hours is None:
         return
@@ -560,7 +560,7 @@ def check_age_file_staleness(
     if age_hours < -1:
         if can_send(state, f"{cooldown_key}_future_time", 720):
             alert_parent(
-                f"Julie {device_name} age file has future time",
+                f"Patient {device_name} age file has future time",
                 (
                     f"{file_path.name} has a future timestamp.\n\n"
                     f"Recorded time: {fmt_local(start_time)}\n"
@@ -575,7 +575,7 @@ def check_age_file_staleness(
 
         if can_send(state, f"{cooldown_key}_stale_record", 720):
             alert_parent(
-                f"Julie {device_name} age record may be stale",
+                f"Patient {device_name} age record may be stale",
                 (
                     f"{file_path.name} looks outdated.\n\n"
                     f"Recorded time: {fmt_local(start_time)}\n"
@@ -584,7 +584,7 @@ def check_age_file_staleness(
                     f"Latest matching Nightscout event found: {latest_text}\n\n"
                     f"This may mean the {device_name} was changed but the local file was not updated, "
                     f"or there was a disk/write problem.\n\n"
-                    f"Please check Julie's Nightscout/Loop and correct {file_path.name} if needed."
+                    f"Please check Nightscout/Loop and correct {file_path.name} if needed."
                 ),
             )
 
@@ -733,7 +733,7 @@ def check_loop_and_device_health(state, dev_info, latest_cgm_time):
     if dev_age is None:
         if can_send(state, "devicestatus_missing", 30):
             alert_parent(
-                "Julie Nightscout devicestatus missing",
+                "Patient Nightscout devicestatus missing",
                 (
                     f"Nightscout returned no usable devicestatus.\n\n"
                     f"CGM last update: {fmt_local(latest_cgm_time)}\n"
@@ -744,15 +744,15 @@ def check_loop_and_device_health(state, dev_info, latest_cgm_time):
     elif dev_age > DEVICESTATUS_STALE_MINUTES:
         if can_send(state, "devicestatus_stale", 30):
             alert_both(
-                "Julie Loop/Nightscout status may be stale",
+                "Patient Loop/Nightscout status may be stale",
                 (
-                    f"Julie, Loop/Nightscout status may not be updating.\n\n"
+                    f"Your Loop/Nightscout status may not be updating.\n\n"
                     f"Last Loop status upload: {fmt_local(dev_info.get('dev_created_at'))}\n"
                     f"Age: {dev_age:.0f} minutes\n\n"
                     f"Please check Loop app, phone internet, and Nightscout upload."
                 ),
                 (
-                    f"Julie devicestatus stale.\n"
+                    f"Patient devicestatus stale.\n"
                     f"Last devicestatus: {fmt_local(dev_info.get('dev_created_at'))}\n"
                     f"Age: {dev_age:.1f} minutes\n"
                     f"Uploader: {dev_info.get('uploader_name')}\n"
@@ -767,7 +767,7 @@ def check_loop_and_device_health(state, dev_info, latest_cgm_time):
     if loop_age is None:
         if can_send(state, "loop_timestamp_missing", 30):
             alert_parent(
-                "Julie Loop timestamp missing",
+                "Patient Loop timestamp missing",
                 (
                     f"Latest devicestatus does not include loop.timestamp.\n\n"
                     f"This may mean Loop data is not uploading correctly.\n"
@@ -777,15 +777,15 @@ def check_loop_and_device_health(state, dev_info, latest_cgm_time):
     elif loop_age > LOOP_STALE_MINUTES:
         if can_send(state, "loop_stale", 20):
             alert_both(
-                "Julie Loop may have stopped updating",
+                "Patient Loop may have stopped updating",
                 (
-                    f"Julie, Loop may not be updating.\n\n"
+                    f"Your Loop may not be updating.\n\n"
                     f"Last Loop timestamp: {fmt_local(dev_info.get('loop_timestamp'))}\n"
                     f"Age: {loop_age:.0f} minutes\n\n"
                     f"Please open Loop and check that it is running."
                 ),
                 (
-                    f"Julie Loop stale alert.\n"
+                    f"Patient Loop stale alert.\n"
                     f"Last Loop timestamp: {fmt_local(dev_info.get('loop_timestamp'))}\n"
                     f"Loop age: {loop_age:.1f} minutes\n"
                     f"Devicestatus age: {dev_age}\n"
@@ -799,13 +799,13 @@ def check_loop_and_device_health(state, dev_info, latest_cgm_time):
         if uploader_battery <= UPLOADER_BATTERY_URGENT:
             if can_send(state, "uploader_battery_urgent", 60):
                 alert_both(
-                    f"Julie phone battery very low: {uploader_battery:.0f}%",
+                    f"Patient phone battery very low: {uploader_battery:.0f}%",
                     (
-                        f"Julie, your Loop uploader phone battery appears very low: {uploader_battery:.0f}%.\n\n"
+                        f"Your Loop uploader phone battery appears very low: {uploader_battery:.0f}%.\n\n"
                         f"Please charge it so Dexcom/Loop/Nightscout can keep working."
                     ),
                     (
-                        f"Julie uploader battery urgent.\n"
+                        f"Patient uploader battery urgent.\n"
                         f"Battery: {uploader_battery:.0f}%\n"
                         f"Uploader timestamp: {fmt_local(dev_info.get('uploader_timestamp'))}\n"
                         f"Uploader age: {uploader_age}\n"
@@ -816,13 +816,13 @@ def check_loop_and_device_health(state, dev_info, latest_cgm_time):
         elif uploader_battery <= UPLOADER_BATTERY_WARN:
             if can_send(state, "uploader_battery_warn", 180):
                 alert_both(
-                    f"Julie phone battery low: {uploader_battery:.0f}%",
+                    f"Patient phone battery low: {uploader_battery:.0f}%",
                     (
-                        f"Julie, your Loop uploader phone battery is low: {uploader_battery:.0f}%.\n\n"
+                        f"Your Loop uploader phone battery is low: {uploader_battery:.0f}%.\n\n"
                         f"Please charge it when convenient."
                     ),
                     (
-                        f"Julie uploader battery low.\n"
+                        f"Patient uploader battery low.\n"
                         f"Battery: {uploader_battery:.0f}%\n"
                         f"Uploader timestamp: {fmt_local(dev_info.get('uploader_timestamp'))}\n"
                         f"Nightscout: {NS_URL}"
@@ -833,15 +833,15 @@ def check_loop_and_device_health(state, dev_info, latest_cgm_time):
     if pump_clock_age is not None and pump_clock_age > PUMP_CLOCK_STALE_MINUTES:
         if can_send(state, "pump_clock_stale", 30):
             alert_both(
-                "Julie pump communication may be stale",
+                "Patient pump communication may be stale",
                 (
-                    f"Julie, pump communication may be stale.\n\n"
+                    f"Pump communication may be stale.\n\n"
                     f"Last pump clock: {fmt_local(dev_info.get('pump_clock'))}\n"
                     f"Age: {pump_clock_age:.0f} minutes\n\n"
                     f"Please check Loop/Pod communication."
                 ),
                 (
-                    f"Julie pump clock stale.\n"
+                    f"Patient pump clock stale.\n"
                     f"Pump clock: {fmt_local(dev_info.get('pump_clock'))}\n"
                     f"Pump clock age: {pump_clock_age:.1f} minutes\n"
                     f"Pump model: {dev_info.get('pump_model')}\n"
@@ -854,13 +854,13 @@ def check_loop_and_device_health(state, dev_info, latest_cgm_time):
     if pump_suspended is True:
         if can_send(state, "pump_suspended", 15):
             alert_both(
-                "URGENT: Julie pump appears suspended",
+                "URGENT: Patient pump appears suspended",
                 (
-                    f"Julie, Nightscout shows the pump may be suspended.\n\n"
+                    f"Nightscout shows the pump may be suspended.\n\n"
                     f"Please check Loop/Pod immediately."
                 ),
                 (
-                    f"Julie pump suspended alert.\n"
+                    f"Patient pump suspended alert.\n"
                     f"Pump suspended: {pump_suspended}\n"
                     f"Pump model: {dev_info.get('pump_model')}\n"
                     f"Pump ID: {dev_info.get('pump_id')}\n"
@@ -878,7 +878,7 @@ def extract_reservoir_units(devicestatus, status):
     """
     Try to find exact pump reservoir / remaining insulin.
 
-    Current Julie Nightscout data may not expose this field.
+    Current Nightscout data may not expose this field.
     Do not use status.extendedSettings.pump.warnRes or urgentRes;
     those are alert thresholds, not actual remaining insulin.
     """
@@ -1230,13 +1230,13 @@ def check_pod_age_alert(state, pod_start_time, pod_age_hours, pod_source):
     if pod_age_hours >= POD_EXPIRE_HOURS:
         if can_send(state, "pod_age_expired", 180):
             alert_both(
-                f"Julie pod may be expired: {fmt_hours_as_age(pod_age_hours)}",
+                f"Patient pod may be expired: {fmt_hours_as_age(pod_age_hours)}",
                 (
-                    f"Julie, your pod appears to be about {fmt_hours_as_age(pod_age_hours)} old.\n\n"
+                    f"Your pod appears to be about {fmt_hours_as_age(pod_age_hours)} old.\n\n"
                     f"Please check Loop/Pod and replace if needed."
                 ),
                 (
-                    f"Julie pod age alert.\n"
+                    f"Patient pod age alert.\n"
                     f"Pod start: {fmt_local(pod_start_time)}\n"
                     f"Pod age: {pod_age_hours:.1f} hours / {fmt_hours_as_age(pod_age_hours)}\n"
                     f"Source: {pod_source}\n"
@@ -1247,14 +1247,14 @@ def check_pod_age_alert(state, pod_start_time, pod_age_hours, pod_source):
     elif pod_age_hours >= POD_WARN_HOURS:
         if can_send(state, "pod_age_warn", 360):
             alert_both(
-                f"Julie pod nearing 72h: {fmt_hours_as_age(pod_age_hours)}",
+                f"Patient pod nearing 72h: {fmt_hours_as_age(pod_age_hours)}",
                 (
-                    f"Julie, your pod is getting close to 72 hours.\n\n"
+                    f"Your pod is getting close to 72 hours.\n\n"
                     f"Pod age: {fmt_hours_as_age(pod_age_hours)}\n"
                     f"Consider whether to replace before sleep or school."
                 ),
                 (
-                    f"Julie pod nearing 72h.\n"
+                    f"Patient pod nearing 72h.\n"
                     f"Pod start: {fmt_local(pod_start_time)}\n"
                     f"Pod age: {pod_age_hours:.1f} hours / {fmt_hours_as_age(pod_age_hours)}\n"
                     f"Source: {pod_source}\n"
@@ -1270,13 +1270,13 @@ def check_dexcom_age_alert(state, dexcom_start_time, dexcom_age_hours, dexcom_so
     if dexcom_age_hours >= DEXCOM_URGENT_HOURS:
         if can_send(state, "dexcom_age_urgent", 180):
             alert_both(
-                f"Julie Dexcom near end: {fmt_hours_as_age(dexcom_age_hours)}",
+                f"Patient Dexcom near end: {fmt_hours_as_age(dexcom_age_hours)}",
                 (
-                    f"Julie, your Dexcom sensor appears to be about {fmt_hours_as_age(dexcom_age_hours)} old.\n\n"
+                    f"Your Dexcom sensor appears to be about {fmt_hours_as_age(dexcom_age_hours)} old.\n\n"
                     f"It may be near the end of the grace period. Please check Dexcom and replace if needed."
                 ),
                 (
-                    f"Julie Dexcom urgent age alert.\n"
+                    f"Patient Dexcom urgent age alert.\n"
                     f"Dexcom start: {fmt_local(dexcom_start_time)}\n"
                     f"Dexcom age: {dexcom_age_hours:.1f} hours / {fmt_hours_as_age(dexcom_age_hours)}\n"
                     f"Source: {dexcom_source}\n"
@@ -1287,13 +1287,13 @@ def check_dexcom_age_alert(state, dexcom_start_time, dexcom_age_hours, dexcom_so
     elif dexcom_age_hours >= DEXCOM_REPLACE_HOURS:
         if can_send(state, "dexcom_age_replace", 360):
             alert_both(
-                f"Julie Dexcom replacement reminder: {fmt_hours_as_age(dexcom_age_hours)}",
+                f"Patient Dexcom replacement reminder: {fmt_hours_as_age(dexcom_age_hours)}",
                 (
-                    f"Julie, your Dexcom sensor appears to be about {fmt_hours_as_age(dexcom_age_hours)} old.\n\n"
+                    f"Your Dexcom sensor appears to be about {fmt_hours_as_age(dexcom_age_hours)} old.\n\n"
                     f"Please consider replacing it at a convenient time, especially before sleep or school."
                 ),
                 (
-                    f"Julie Dexcom replacement reminder.\n"
+                    f"Patient Dexcom replacement reminder.\n"
                     f"Dexcom start: {fmt_local(dexcom_start_time)}\n"
                     f"Dexcom age: {dexcom_age_hours:.1f} hours / {fmt_hours_as_age(dexcom_age_hours)}\n"
                     f"Source: {dexcom_source}\n"
@@ -1304,14 +1304,14 @@ def check_dexcom_age_alert(state, dexcom_start_time, dexcom_age_hours, dexcom_so
     elif dexcom_age_hours >= DEXCOM_WARN_HOURS:
         if can_send(state, "dexcom_age_warn", 720):
             alert_both(
-                f"Julie Dexcom nearing 10 days: {fmt_hours_as_age(dexcom_age_hours)}",
+                f"Patient Dexcom nearing 10 days: {fmt_hours_as_age(dexcom_age_hours)}",
                 (
-                    f"Julie, your Dexcom sensor is getting close to 10 days.\n\n"
+                    f"Your Dexcom sensor is getting close to 10 days.\n\n"
                     f"Dexcom age: {fmt_hours_as_age(dexcom_age_hours)}\n"
                     f"Consider whether to replace before sleep or school."
                 ),
                 (
-                    f"Julie Dexcom nearing 10 days.\n"
+                    f"Patient Dexcom nearing 10 days.\n"
                     f"Dexcom start: {fmt_local(dexcom_start_time)}\n"
                     f"Dexcom age: {dexcom_age_hours:.1f} hours / {fmt_hours_as_age(dexcom_age_hours)}\n"
                     f"Source: {dexcom_source}\n"
@@ -1321,11 +1321,11 @@ def check_dexcom_age_alert(state, dexcom_start_time, dexcom_age_hours, dexcom_so
 
 
 def check_pod_insulin_alert(
-    state,
-    insulin_left,
-    insulin_source,
-    pod_start_time,
-    pod_age_hours,
+        state,
+        insulin_left,
+        insulin_source,
+        pod_start_time,
+        pod_age_hours,
 ):
     if insulin_left is None:
         return
@@ -1333,14 +1333,14 @@ def check_pod_insulin_alert(
     if insulin_left <= POD_INSULIN_URGENT_U:
         if can_send(state, "pod_insulin_urgent", 60):
             alert_both(
-                f"Julie pod insulin very low: {insulin_left:.1f}U",
+                f"Patient pod insulin very low: {insulin_left:.1f}U",
                 (
-                    f"Julie, pod insulin may be very low.\n\n"
+                    f"Pod insulin may be very low.\n\n"
                     f"Estimated/known remaining insulin: {insulin_left:.1f}U\n"
                     f"Please check Loop/Pod and prepare to replace the pod."
                 ),
                 (
-                    f"Julie pod insulin urgent.\n"
+                    f"Patient pod insulin urgent.\n"
                     f"Remaining insulin: {insulin_left:.1f}U\n"
                     f"Source: {insulin_source}\n"
                     f"Pod start: {fmt_local(pod_start_time)}\n"
@@ -1352,14 +1352,14 @@ def check_pod_insulin_alert(
     elif insulin_left < POD_INSULIN_WARN_U:
         if can_send(state, "pod_insulin_low", 120):
             alert_both(
-                f"Julie pod insulin low: {insulin_left:.1f}U",
+                f"Patient pod insulin low: {insulin_left:.1f}U",
                 (
-                    f"Julie, pod insulin may be getting low.\n\n"
+                    f"Pod insulin may be getting low.\n\n"
                     f"Estimated/known remaining insulin: {insulin_left:.1f}U\n"
                     f"Consider replacing before sleep or school."
                 ),
                 (
-                    f"Julie pod insulin low reminder.\n"
+                    f"Patient pod insulin low reminder.\n"
                     f"Remaining insulin: {insulin_left:.1f}U\n"
                     f"Source: {insulin_source}\n"
                     f"Pod start: {fmt_local(pod_start_time)}\n"
@@ -1441,8 +1441,8 @@ def main():
     if not entries:
         if can_send(state, "no_entries", 20):
             alert_parent(
-                "Julie Nightscout no CGM entries",
-                f"Julie Nightscout returned no CGM entries.\n\nNightscout: {NS_URL}",
+                "Patient Nightscout no CGM entries",
+                f"Patient Nightscout returned no CGM entries.\n\nNightscout: {NS_URL}",
             )
         save_alert_state(state)
         return
@@ -1455,7 +1455,7 @@ def main():
     if not latest_time:
         if can_send(state, "bad_cgm_time", 30):
             alert_parent(
-                "Julie Nightscout CGM time parse error",
+                "Patient Nightscout CGM time parse error",
                 f"Could not parse latest CGM time.\n\nLatest entry:\n{json.dumps(latest, indent=2)}",
             )
         save_alert_state(state)
@@ -1466,15 +1466,15 @@ def main():
     if age_min > STALE_MINUTES:
         if can_send(state, "stale_data", 20):
             alert_both(
-                "Julie Dexcom/CGM data stale",
+                "Patient Dexcom/CGM data stale",
                 (
-                    f"Julie, Dexcom/CGM data may be stale.\n\n"
+                    f"Dexcom/CGM data may be stale.\n\n"
                     f"Last CGM update: {fmt_local(latest_time)}\n"
                     f"Age: {age_min} minutes\n\n"
                     f"Please check Dexcom, Bluetooth, Loop, and Nightscout upload."
                 ),
                 (
-                    f"Julie Dexcom/CGM data may be stale.\n"
+                    f"Patient Dexcom/CGM data may be stale.\n"
                     f"Last CGM update: {fmt_local(latest_time)}\n"
                     f"Age: {age_min} minutes\n"
                     f"Nightscout: {NS_URL}"
@@ -1551,14 +1551,14 @@ def main():
     if isinstance(bg, (int, float)) and bg <= LOW_NOW:
         if can_send(state, "low_now", 15):
             alert_both(
-                f"URGENT: Julie BG {bg}",
+                f"URGENT: Patient BG {bg}",
                 (
-                    f"Julie, your BG is {bg} {direction}.\n\n"
+                    f"Your BG is {bg} {direction}.\n\n"
                     f"Please check Dexcom/Loop now and follow your low treatment plan.\n\n"
                     f"Nightscout: {NS_URL}"
                 ),
                 (
-                    f"Julie low alert sent.\n"
+                    f"Patient low alert sent.\n"
                     f"BG: {bg} {direction}\n"
                     f"Time: {fmt_local(latest_time)}\n"
                     f"IOB: {iob}\n"
@@ -1574,22 +1574,22 @@ def main():
     # ------------------------------------------------------------
 
     elif (
-        (min_pred_30 is not None and min_pred_30 <= LOW_SOON_30_MIN)
-        or
-        (min_pred_60 is not None and min_pred_60 <= LOW_SOON_60_MIN)
+            (min_pred_30 is not None and min_pred_30 <= LOW_SOON_30_MIN)
+            or
+            (min_pred_60 is not None and min_pred_60 <= LOW_SOON_60_MIN)
     ):
         if can_send(state, "low_soon", 20):
             alert_both(
-                f"Julie possible low soon: BG {bg}",
+                f"Patient possible low soon: BG {bg}",
                 (
-                    f"Julie, Loop predicts your BG may go low soon.\n\n"
+                    f"Loop predicts your BG may go low soon.\n\n"
                     f"Current BG: {bg} {direction}\n"
                     f"Predicted 30-min low: {min_pred_30}\n"
                     f"Predicted 60-min low: {min_pred_60}\n\n"
                     f"Please check Dexcom/Loop."
                 ),
                 (
-                    f"Julie possible low-soon alert sent.\n"
+                    f"Patient possible low-soon alert sent.\n"
                     f"Current BG: {bg} {direction}\n"
                     f"Predicted 30-min low: {min_pred_30}\n"
                     f"Predicted 60-min low: {min_pred_60}\n"
@@ -1607,7 +1607,7 @@ def main():
         high_key = "high_now"
         high_cooldown = 45
 
-       # If BG is high and still rising, remind more frequently.
+        # If BG is high and still rising, remind more frequently.
         if bg >= HIGH_NOW and str(direction) in {"SingleUp", "DoubleUp", "FortyFiveUp"}:
             high_key = "high_now_rising"
             high_cooldown = 20
@@ -1619,14 +1619,14 @@ def main():
 
         if can_send(state, high_key, high_cooldown):
             alert_both(
-                f"Julie high BG {bg}",
+                f"Patient high BG {bg}",
                 (
-                    f"Julie, your BG is {bg} {direction}.\n\n"
+                    f"Your BG is {bg} {direction}.\n\n"
                     f"Please check Loop/IOB, pod site, and follow your usual high-BG plan.\n\n"
                     f"Nightscout: {NS_URL}"
                 ),
                 (
-                    f"Julie high alert sent.\n"
+                    f"Patient high alert sent.\n"
                     f"BG: {bg} {direction}\n"
                     f"Time: {fmt_local(latest_time)}\n"
                     f"IOB: {iob}\n"
@@ -1641,23 +1641,23 @@ def main():
     # ------------------------------------------------------------
 
     if (
-        max_pred_90 is not None
-        and max_pred_90 >= HIGH_PREDICTED
-        and isinstance(bg, (int, float))
-        and bg >= 140
+            max_pred_90 is not None
+            and max_pred_90 >= HIGH_PREDICTED
+            and isinstance(bg, (int, float))
+            and bg >= 140
     ):
         if can_send(state, "high_predicted", 60):
             alert_both(
-                f"Julie BG may go high: {bg}",
+                f"Patient BG may go high: {bg}",
                 (
-                    f"Julie, Loop predicts your BG may go high.\n\n"
+                    f"Loop predicts your BG may go high.\n\n"
                     f"Current BG: {bg} {direction}\n"
                     f"Predicted 60-min high: {max_pred_60}\n"
                     f"Predicted 90-min high: {max_pred_90}\n\n"
                     f"Please check Loop and follow your usual plan."
                 ),
                 (
-                    f"Julie high-predicted alert sent.\n"
+                    f"Patient high-predicted alert sent.\n"
                     f"Current BG: {bg} {direction}\n"
                     f"Predicted 60-min high: {max_pred_60}\n"
                     f"Predicted 90-min high: {max_pred_90}\n"
@@ -1677,9 +1677,9 @@ def main():
     if missing:
         if can_send(state, "missing_bolus_steady_rise", 60):
             alert_both(
-                "Julie possible missed carb/bolus",
+                "Patient possible missed carb/bolus",
                 (
-                    f"Julie, your BG has been rising and Nightscout does not show recent carbs "
+                    f"Your BG has been rising and Nightscout does not show recent carbs "
                     f"or a meaningful bolus/correction.\n\n"
                     f"Start BG: {missing['start_bg']:.0f}\n"
                     f"Current BG: {missing['current_bg']:.0f} {direction}\n"
@@ -1687,7 +1687,7 @@ def main():
                     f"Please check Loop and make sure food/bolus was entered if needed."
                 ),
                 (
-                    f"Julie possible missed carb/bolus detected.\n"
+                    f"Patient possible missed carb/bolus detected.\n"
                     f"Reason: steady BG rise with no carb entry and no meaningful bolus/correction.\n\n"
                     f"Start BG: {missing['start_bg']:.0f}\n"
                     f"Current BG: {missing['current_bg']:.0f} {direction}\n"
