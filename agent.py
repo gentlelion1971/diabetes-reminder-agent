@@ -693,6 +693,24 @@ def get_latest_devicestatus_info(devicestatus):
     pump_clock = parse_ns_time_value(pump.get("clock"))
     pump_clock_age_min = minutes_old(pump_clock)
 
+#    loop = latest_dev.get("loop", {}) or {}
+    loop_timestamp = parse_ns_time_value(loop.get("timestamp"))
+    loop_age_min = minutes_old(loop_timestamp)
+
+    reservoir_display_override = str(pump.get("reservoir_display_override", "") or "")
+    pump_id = str(pump.get("pumpID", "") or "")
+    loop_failure_reason = str(loop.get("failureReason", "") or "")
+
+    no_pod_detected = (
+        "no pod" in reservoir_display_override.lower()
+        or "no pod paired" in loop_failure_reason.lower()
+        or "no active pod" in loop_failure_reason.lower()
+        or (
+            pump_id.lower() == "unknown"
+            and "no pod" in reservoir_display_override.lower()
+        )
+    )
+    
     return {
         "latest_dev": latest_dev,
         "dev_created_at": dev_created_at,
@@ -709,6 +727,10 @@ def get_latest_devicestatus_info(devicestatus):
         "pump_bolusing": pump.get("bolusing"),
         "pump_id": pump.get("pumpID"),
         "pump_model": pump.get("model"),
+        "reservoir_display_override": pump.get("reservoir_display_override"),
+        "reservoir_level_override": pump.get("reservoir_level_override"),
+        "loop_failure_reason": loop.get("failureReason"),
+        "no_pod_detected": no_pod_detected,
     }
 
 
@@ -868,7 +890,28 @@ def check_loop_and_device_health(state, dev_info, latest_cgm_time):
                     f"Nightscout: {NS_URL}"
                 ),
             )
-
+	    
+    # 6. No Pod / no pod paired
+    if dev_info.get("no_pod_detected"):
+        if can_send(state, "pump_no_pod", 10):
+            alert_both(
+                "URGENT: Julie pump shows No Pod",
+                (
+                    f"Julie, Loop/Nightscout shows No Pod or no pod paired.\n\n"
+                    f"Please check Loop and Pod immediately."
+                ),
+                (
+                    f"Julie urgent pump/pod alert.\n\n"
+                    f"Nightscout/Loop reports No Pod or no pod paired.\n\n"
+                    f"reservoir_display_override: {dev_info.get('reservoir_display_override')}\n"
+                    f"reservoir_level_override: {dev_info.get('reservoir_level_override')}\n"
+                    f"pumpID: {dev_info.get('pump_id')}\n"
+                    f"pump model: {dev_info.get('pump_model')}\n"
+                    f"pump clock: {fmt_local(dev_info.get('pump_clock'))}\n"
+                    f"Loop failure reason: {dev_info.get('loop_failure_reason')}\n"
+                    f"Nightscout: {NS_URL}"
+                ),
+            )
 
 # ============================================================
 # Exact reservoir if Nightscout ever exposes it
@@ -1729,7 +1772,10 @@ def main():
     print(f"Pump clock age: {dev_info.get('pump_clock_age_min')}")
     print(f"Pump suspended: {dev_info.get('pump_suspended')}")
     print(f"Pump bolusing: {dev_info.get('pump_bolusing')}")
-
+    print(f"Reservoir display override: {dev_info.get('reservoir_display_override')}")
+    print(f"Reservoir level override: {dev_info.get('reservoir_level_override')}")
+    print(f"Loop failure reason: {dev_info.get('loop_failure_reason')}")
+    print(f"No pod detected: {dev_info.get('no_pod_detected')}")
     print(f"Pod start: {fmt_local(pod_start_time) if pod_start_time else None}")
     print(f"Pod source: {pod_source}")
     print(f"Pod age: {pod_age_hours:.1f}h / {fmt_hours_as_age(pod_age_hours) if pod_age_hours is not None else None}")
