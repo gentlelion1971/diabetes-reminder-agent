@@ -32,6 +32,12 @@ PARENT_EMAIL = os.environ["PARENT_EMAIL"]
 DRY_RUN = os.environ.get("DRY_RUN", "true").strip().lower() in {"1", "true", "yes", "y"}
 LOCAL_TZ = ZoneInfo(os.environ.get("TIMEZONE", "America/New_York"))
 
+# Optional Verizon email-to-text
+ENABLE_TEXT = os.environ.get("ENABLE_TEXT", "false").strip().lower() in {"1", "true", "yes", "y"}
+JULIE_TEXT_EMAIL = os.environ.get("JULIE_TEXT_EMAIL", "").strip()
+PARENT_TEXT_EMAIL = os.environ.get("PARENT_TEXT_EMAIL", "").strip()
+TEXT_MAX_CHARS = int(os.environ.get("TEXT_MAX_CHARS", "150"))
+
 STATE_FILE = Path("alert_state.json")
 PODAGE_FILE = Path("podage.txt")
 DEXCOMAGE_FILE = Path("dexcomage.txt")
@@ -48,37 +54,39 @@ LOW_SOON_60_MIN = float(os.environ.get("LOW_SOON_60_MIN", "70"))
 HIGH_NOW = float(os.environ.get("HIGH_NOW", "250"))
 HIGH_PREDICTED = float(os.environ.get("HIGH_PREDICTED", "220"))
 
+# Dexcom / CGM freshness
 STALE_MINUTES = float(os.environ.get("STALE_MINUTES", "15"))
 
 # Uploader phone battery / Loop health
-UPLOADER_BATTERY_WARN = float(os.environ.get("UPLOADER_BATTERY_WARN", "10"))
-UPLOADER_BATTERY_URGENT = float(os.environ.get("UPLOADER_BATTERY_URGENT", "5"))
+UPLOADER_BATTERY_WARN = float(os.environ.get("UPLOADER_BATTERY_WARN", "30"))
+UPLOADER_BATTERY_URGENT = float(os.environ.get("UPLOADER_BATTERY_URGENT", "20"))
 
 DEVICESTATUS_STALE_MINUTES = float(os.environ.get("DEVICESTATUS_STALE_MINUTES", "15"))
 LOOP_STALE_MINUTES = float(os.environ.get("LOOP_STALE_MINUTES", "15"))
 PUMP_CLOCK_STALE_MINUTES = float(os.environ.get("PUMP_CLOCK_STALE_MINUTES", "30"))
+
 # Pod age / Omnipod age
 POD_WARN_HOURS = float(os.environ.get("POD_WARN_HOURS", "68"))
 POD_EXPIRE_HOURS = float(os.environ.get("POD_EXPIRE_HOURS", "72"))
 POD_RECORD_STALE_HOURS = float(os.environ.get("POD_RECORD_STALE_HOURS", "84"))
 
 # Dexcom G7 age
-DEXCOM_WARN_HOURS = float(os.environ.get("DEXCOM_WARN_HOURS", str(9 * 24 + 18)))     # 9d18h
-DEXCOM_REPLACE_HOURS = float(os.environ.get("DEXCOM_REPLACE_HOURS", str(10 * 24)))   # 10d
-DEXCOM_URGENT_HOURS = float(os.environ.get("DEXCOM_URGENT_HOURS", str(10 * 24 + 10))) # 10d10h
-DEXCOM_RECORD_STALE_HOURS = float(os.environ.get("DEXCOM_RECORD_STALE_HOURS", "264")) # 11d
+DEXCOM_WARN_HOURS = float(os.environ.get("DEXCOM_WARN_HOURS", str(9 * 24 + 18)))       # 9d18h
+DEXCOM_REPLACE_HOURS = float(os.environ.get("DEXCOM_REPLACE_HOURS", str(10 * 24)))     # 10d
+DEXCOM_URGENT_HOURS = float(os.environ.get("DEXCOM_URGENT_HOURS", str(10 * 24 + 10)))  # 10d10h
+DEXCOM_RECORD_STALE_HOURS = float(os.environ.get("DEXCOM_RECORD_STALE_HOURS", "264"))  # 11d
 
 # Pump insulin estimation
-POD_INITIAL_UNITS = float(os.environ.get("POD_INITIAL_UNITS", "150"))
+POD_INITIAL_UNITS = float(os.environ.get("POD_INITIAL_UNITS", "200"))
 POD_INSULIN_WARN_U = float(os.environ.get("POD_INSULIN_WARN_U", "10"))
 POD_INSULIN_URGENT_U = float(os.environ.get("POD_INSULIN_URGENT_U", "5"))
 
-# Missing bolus logic
+# Missing carb / missing bolus logic
 MISSING_BOLUS_LOOKBACK_MIN = float(os.environ.get("MISSING_BOLUS_LOOKBACK_MIN", "60"))
 MISSING_BOLUS_MIN_CURRENT_BG = float(os.environ.get("MISSING_BOLUS_MIN_CURRENT_BG", "150"))
-MISSING_BOLUS_MIN_RISE = float(os.environ.get("MISSING_BOLUS_MIN_RISE", "40"))
-MISSING_BOLUS_MIN_SLOPE = float(os.environ.get("MISSING_BOLUS_MIN_SLOPE", "0.45"))
-MISSING_BOLUS_MIN_DURATION = float(os.environ.get("MISSING_BOLUS_MIN_DURATION", "35"))
+MISSING_BOLUS_MIN_RISE = float(os.environ.get("MISSING_BOLUS_MIN_RISE", "30"))
+MISSING_BOLUS_MIN_SLOPE = float(os.environ.get("MISSING_BOLUS_MIN_SLOPE", "0.30"))
+MISSING_BOLUS_MIN_DURATION = float(os.environ.get("MISSING_BOLUS_MIN_DURATION", "30"))
 MISSING_BOLUS_MIN_POINTS = int(os.environ.get("MISSING_BOLUS_MIN_POINTS", "6"))
 
 
@@ -109,7 +117,7 @@ def save_alert_state(state):
 
 def can_send(state, key, cooldown_minutes):
     """
-    Prevent repeated email spam.
+    Prevent repeated email/text spam.
     """
     now = datetime.now(timezone.utc)
     last = state.get(key)
@@ -132,7 +140,7 @@ def can_send(state, key, cooldown_minutes):
 
 
 # ============================================================
-# Email
+# Email + Verizon email-to-text
 # ============================================================
 
 def send_email(to_email, subject, body):
@@ -163,12 +171,81 @@ def send_email(to_email, subject, body):
             smtp.send_message(msg)
 
 
+def make_text_message(subject, body):
+    """
+    Create a short SMS-style message for Verizon email-to-text.
+    Keep it short because vtext.com can cut or reject long messages.
+    """
+    first_line = ""
+
+    for line in body.splitlines():
+        line = line.strip()
+        if line:
+            first_line = line
+            break
+
+    msg = subject.strip()
+
+    if first_line and first_line not in msg:
+        msg = f"{msg}: {first_line}"
+
+    msg = " ".join(msg.split())
+
+    if len(msg) > TEXT_MAX_CHARS:
+        msg = msg[:TEXT_MAX_CHARS - 3] + "..."
+
+    return msg
+
+
+def send_text_email(to_text_email, subject, body):
+    """
+    Send a text message using Verizon email-to-text.
+    Example:
+      2155551234@vtext.com
+      2155551234@vzwpix.com
+    """
+    if not ENABLE_TEXT:
+        return
+
+    if not to_text_email:
+        return
+
+    text = make_text_message(subject, body)
+
+    print("=" * 90)
+    print(f"TEXT EMAIL TO: {to_text_email}")
+    print(text)
+    print("=" * 90)
+
+    if DRY_RUN:
+        print("DRY_RUN=true, not sending real text email.")
+        return
+
+    msg = EmailMessage()
+    msg["From"] = EMAIL_USER
+    msg["To"] = to_text_email
+    msg["Subject"] = ""
+    msg.set_content(text)
+
+    if EMAIL_PORT == 465:
+        with smtplib.SMTP_SSL(EMAIL_HOST, EMAIL_PORT, timeout=30) as smtp:
+            smtp.login(EMAIL_USER, EMAIL_APP_PASSWORD)
+            smtp.send_message(msg)
+    else:
+        with smtplib.SMTP(EMAIL_HOST, EMAIL_PORT, timeout=30) as smtp:
+            smtp.starttls()
+            smtp.login(EMAIL_USER, EMAIL_APP_PASSWORD)
+            smtp.send_message(msg)
+
+
 def alert_julie(subject, body):
     send_email(JULIE_EMAIL, subject, body)
+    send_text_email(JULIE_TEXT_EMAIL, subject, body)
 
 
 def alert_parent(subject, body):
     send_email(PARENT_EMAIL, subject, body)
+    send_text_email(PARENT_TEXT_EMAIL, subject, body)
 
 
 def alert_both(subject, julie_body, parent_body=None):
@@ -217,6 +294,19 @@ def parse_ns_time(item):
     return None
 
 
+def parse_ns_time_value(value):
+    if not value:
+        return None
+
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+        except Exception:
+            return None
+
+    return None
+
+
 def parse_iso_datetime(value):
     if not value:
         return None
@@ -236,6 +326,12 @@ def fmt_local(dt):
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(LOCAL_TZ).strftime("%Y-%m-%d %I:%M %p")
+
+
+def minutes_old(dt):
+    if not dt:
+        return None
+    return (datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds() / 60
 
 
 def age_hours_from_dt(dt):
@@ -266,8 +362,7 @@ def fmt_hours_as_age(hours):
 def read_time_file(path):
     """
     Read one ISO timestamp from podage.txt or dexcomage.txt.
-    Only first non-empty line is used.
-    Comments starting with # are ignored.
+    Only first non-empty non-comment line is used.
     """
     if not path.exists():
         return None, f"{path.name} does not exist"
@@ -276,7 +371,12 @@ def read_time_file(path):
     if not raw:
         return None, f"{path.name} is empty"
 
-    lines = [line.strip() for line in raw.splitlines() if line.strip() and not line.strip().startswith("#")]
+    lines = [
+        line.strip()
+        for line in raw.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
     if not lines:
         return None, f"{path.name} has no timestamp line"
 
@@ -522,7 +622,7 @@ def parse_float(value):
 
 
 # ============================================================
-# Loop info
+# Loop / devicestatus info
 # ============================================================
 
 def get_loop_info(devicestatus):
@@ -552,6 +652,224 @@ def get_loop_info(devicestatus):
     }
 
 
+def get_latest_devicestatus_info(devicestatus):
+    """
+    Extract freshness/battery/loop/pump status from latest devicestatus.
+    """
+    if not devicestatus:
+        return {
+            "latest_dev": None,
+            "dev_created_at": None,
+            "dev_age_min": None,
+            "uploader_name": None,
+            "uploader_battery": None,
+            "uploader_timestamp": None,
+            "uploader_age_min": None,
+            "loop_timestamp": None,
+            "loop_age_min": None,
+            "pump_clock": None,
+            "pump_clock_age_min": None,
+            "pump_suspended": None,
+            "pump_bolusing": None,
+            "pump_id": None,
+            "pump_model": None,
+        }
+
+    latest_dev = devicestatus[0]
+
+    dev_created_at = parse_ns_time(latest_dev)
+    dev_age_min = minutes_old(dev_created_at)
+
+    uploader = latest_dev.get("uploader", {}) or {}
+    uploader_timestamp = parse_ns_time_value(uploader.get("timestamp"))
+    uploader_age_min = minutes_old(uploader_timestamp)
+    uploader_battery = uploader.get("battery")
+
+    loop = latest_dev.get("loop", {}) or {}
+    loop_timestamp = parse_ns_time_value(loop.get("timestamp"))
+    loop_age_min = minutes_old(loop_timestamp)
+
+    pump = latest_dev.get("pump", {}) or {}
+    pump_clock = parse_ns_time_value(pump.get("clock"))
+    pump_clock_age_min = minutes_old(pump_clock)
+
+    return {
+        "latest_dev": latest_dev,
+        "dev_created_at": dev_created_at,
+        "dev_age_min": dev_age_min,
+        "uploader_name": uploader.get("name"),
+        "uploader_battery": uploader_battery,
+        "uploader_timestamp": uploader_timestamp,
+        "uploader_age_min": uploader_age_min,
+        "loop_timestamp": loop_timestamp,
+        "loop_age_min": loop_age_min,
+        "pump_clock": pump_clock,
+        "pump_clock_age_min": pump_clock_age_min,
+        "pump_suspended": pump.get("suspended"),
+        "pump_bolusing": pump.get("bolusing"),
+        "pump_id": pump.get("pumpID"),
+        "pump_model": pump.get("model"),
+    }
+
+
+def check_loop_and_device_health(state, dev_info, latest_cgm_time):
+    """
+    Monitor:
+    - Nightscout devicestatus stale
+    - Loop stopped / stale
+    - uploader phone battery low
+    - pump clock stale
+    - pump suspended
+    """
+
+    dev_age = dev_info.get("dev_age_min")
+    loop_age = dev_info.get("loop_age_min")
+    uploader_age = dev_info.get("uploader_age_min")
+    pump_clock_age = dev_info.get("pump_clock_age_min")
+    uploader_battery = dev_info.get("uploader_battery")
+    pump_suspended = dev_info.get("pump_suspended")
+
+    # 1. No devicestatus / devicestatus stale.
+    if dev_age is None:
+        if can_send(state, "devicestatus_missing", 30):
+            alert_parent(
+                "Julie Nightscout devicestatus missing",
+                (
+                    f"Nightscout returned no usable devicestatus.\n\n"
+                    f"CGM last update: {fmt_local(latest_cgm_time)}\n"
+                    f"Nightscout: {NS_URL}\n\n"
+                    f"Please check Loop/Nightscout uploader."
+                ),
+            )
+    elif dev_age > DEVICESTATUS_STALE_MINUTES:
+        if can_send(state, "devicestatus_stale", 30):
+            alert_both(
+                "Julie Loop/Nightscout status may be stale",
+                (
+                    f"Julie, Loop/Nightscout status may not be updating.\n\n"
+                    f"Last Loop status upload: {fmt_local(dev_info.get('dev_created_at'))}\n"
+                    f"Age: {dev_age:.0f} minutes\n\n"
+                    f"Please check Loop app, phone internet, and Nightscout upload."
+                ),
+                (
+                    f"Julie devicestatus stale.\n"
+                    f"Last devicestatus: {fmt_local(dev_info.get('dev_created_at'))}\n"
+                    f"Age: {dev_age:.1f} minutes\n"
+                    f"Uploader: {dev_info.get('uploader_name')}\n"
+                    f"Uploader battery: {uploader_battery}\n"
+                    f"Loop timestamp: {fmt_local(dev_info.get('loop_timestamp'))}\n"
+                    f"Pump clock: {fmt_local(dev_info.get('pump_clock'))}\n"
+                    f"Nightscout: {NS_URL}"
+                ),
+            )
+
+    # 2. Loop stale.
+    if loop_age is None:
+        if can_send(state, "loop_timestamp_missing", 30):
+            alert_parent(
+                "Julie Loop timestamp missing",
+                (
+                    f"Latest devicestatus does not include loop.timestamp.\n\n"
+                    f"This may mean Loop data is not uploading correctly.\n"
+                    f"Nightscout: {NS_URL}"
+                ),
+            )
+    elif loop_age > LOOP_STALE_MINUTES:
+        if can_send(state, "loop_stale", 20):
+            alert_both(
+                "Julie Loop may have stopped updating",
+                (
+                    f"Julie, Loop may not be updating.\n\n"
+                    f"Last Loop timestamp: {fmt_local(dev_info.get('loop_timestamp'))}\n"
+                    f"Age: {loop_age:.0f} minutes\n\n"
+                    f"Please open Loop and check that it is running."
+                ),
+                (
+                    f"Julie Loop stale alert.\n"
+                    f"Last Loop timestamp: {fmt_local(dev_info.get('loop_timestamp'))}\n"
+                    f"Loop age: {loop_age:.1f} minutes\n"
+                    f"Devicestatus age: {dev_age}\n"
+                    f"Uploader battery: {uploader_battery}\n"
+                    f"Nightscout: {NS_URL}"
+                ),
+            )
+
+    # 3. Uploader battery low.
+    if isinstance(uploader_battery, (int, float)):
+        if uploader_battery <= UPLOADER_BATTERY_URGENT:
+            if can_send(state, "uploader_battery_urgent", 60):
+                alert_both(
+                    f"Julie phone battery very low: {uploader_battery:.0f}%",
+                    (
+                        f"Julie, your Loop uploader phone battery appears very low: {uploader_battery:.0f}%.\n\n"
+                        f"Please charge it so Dexcom/Loop/Nightscout can keep working."
+                    ),
+                    (
+                        f"Julie uploader battery urgent.\n"
+                        f"Battery: {uploader_battery:.0f}%\n"
+                        f"Uploader timestamp: {fmt_local(dev_info.get('uploader_timestamp'))}\n"
+                        f"Uploader age: {uploader_age}\n"
+                        f"Nightscout: {NS_URL}"
+                    ),
+                )
+
+        elif uploader_battery <= UPLOADER_BATTERY_WARN:
+            if can_send(state, "uploader_battery_warn", 180):
+                alert_both(
+                    f"Julie phone battery low: {uploader_battery:.0f}%",
+                    (
+                        f"Julie, your Loop uploader phone battery is low: {uploader_battery:.0f}%.\n\n"
+                        f"Please charge it when convenient."
+                    ),
+                    (
+                        f"Julie uploader battery low.\n"
+                        f"Battery: {uploader_battery:.0f}%\n"
+                        f"Uploader timestamp: {fmt_local(dev_info.get('uploader_timestamp'))}\n"
+                        f"Nightscout: {NS_URL}"
+                    ),
+                )
+
+    # 4. Pump clock stale / pump communication may be stale.
+    if pump_clock_age is not None and pump_clock_age > PUMP_CLOCK_STALE_MINUTES:
+        if can_send(state, "pump_clock_stale", 30):
+            alert_both(
+                "Julie pump communication may be stale",
+                (
+                    f"Julie, pump communication may be stale.\n\n"
+                    f"Last pump clock: {fmt_local(dev_info.get('pump_clock'))}\n"
+                    f"Age: {pump_clock_age:.0f} minutes\n\n"
+                    f"Please check Loop/Pod communication."
+                ),
+                (
+                    f"Julie pump clock stale.\n"
+                    f"Pump clock: {fmt_local(dev_info.get('pump_clock'))}\n"
+                    f"Pump clock age: {pump_clock_age:.1f} minutes\n"
+                    f"Pump model: {dev_info.get('pump_model')}\n"
+                    f"Pump ID: {dev_info.get('pump_id')}\n"
+                    f"Nightscout: {NS_URL}"
+                ),
+            )
+
+    # 5. Pump suspended.
+    if pump_suspended is True:
+        if can_send(state, "pump_suspended", 15):
+            alert_both(
+                "URGENT: Julie pump appears suspended",
+                (
+                    f"Julie, Nightscout shows the pump may be suspended.\n\n"
+                    f"Please check Loop/Pod immediately."
+                ),
+                (
+                    f"Julie pump suspended alert.\n"
+                    f"Pump suspended: {pump_suspended}\n"
+                    f"Pump model: {dev_info.get('pump_model')}\n"
+                    f"Pump ID: {dev_info.get('pump_id')}\n"
+                    f"Pump clock: {fmt_local(dev_info.get('pump_clock'))}\n"
+                    f"Nightscout: {NS_URL}"
+                ),
+            )
+
+
 # ============================================================
 # Exact reservoir if Nightscout ever exposes it
 # ============================================================
@@ -560,10 +878,8 @@ def extract_reservoir_units(devicestatus, status):
     """
     Try to find exact pump reservoir / remaining insulin.
 
-    Your current Nightscout data did NOT expose this field.
-    This remains here in case Loop/Nightscout starts uploading it later.
-
-    Do not use status.extendedSettings.pump.warnRes or urgentRes here;
+    Current Julie Nightscout data may not expose this field.
+    Do not use status.extendedSettings.pump.warnRes or urgentRes;
     those are alert thresholds, not actual remaining insulin.
     """
     reservoir_keys = {
@@ -584,10 +900,9 @@ def extract_reservoir_units(devicestatus, status):
 
     for source_name, source in [("devicestatus", devicestatus), ("status", status)]:
         for path, key, value in walk_json(source):
-            key_lower = str(key).lower()
             path_lower = path.lower()
 
-            # Avoid status extendedSettings thresholds.
+            # Avoid Nightscout settings thresholds.
             if "extendedsettings" in path_lower:
                 continue
 
@@ -673,37 +988,8 @@ def estimate_remaining_insulin(treatments, pod_start_time):
 
 
 # ============================================================
-# Missing bolus detection
+# Missing carb / bolus detection
 # ============================================================
-
-def is_carb_event(treatment):
-    carbs = treatment.get("carbs")
-    return isinstance(carbs, (int, float)) and carbs >= 5
-
-
-def is_bolus_or_correction_event(treatment):
-    """
-    Count real bolus/correction insulin.
-    Ignore automatic Temp Basal.
-    """
-    event_type = str(treatment.get("eventType", "")).lower()
-    entered_by = str(treatment.get("enteredBy", "")).lower()
-    insulin = treatment.get("insulin")
-
-    if "temp basal" in event_type:
-        return False
-
-    if "bolus" in event_type or "correction" in event_type or "meal" in event_type:
-        return True
-
-    if isinstance(insulin, (int, float)) and insulin > 0:
-        return True
-
-    if "bolus" in entered_by:
-        return True
-
-    return False
-
 
 def treatment_in_window(treatment, start_time, end_time):
     t = parse_ns_time(treatment)
@@ -714,21 +1000,72 @@ def treatment_in_window(treatment, start_time, end_time):
     return start_time <= t <= end_time
 
 
-def has_carb_or_bolus_in_last_hour(treatments, reference_time):
+def get_recent_carb_and_bolus_summary(treatments, reference_time, lookback_min=60):
+    """
+    Summarize recent carb / meaningful bolus events.
+
+    Important:
+    - Ignore automatic Temp Basal.
+    - Ignore tiny automatic Loop insulin events unless they are meaningful.
+    """
     end_time = reference_time.astimezone(timezone.utc)
-    start_time = end_time - timedelta(minutes=MISSING_BOLUS_LOOKBACK_MIN)
+    start_time = end_time - timedelta(minutes=lookback_min)
+
+    carb_events = []
+    meaningful_bolus_events = []
+    automatic_insulin_events = []
 
     for tr in treatments:
         if not treatment_in_window(tr, start_time, end_time):
             continue
 
-        if is_carb_event(tr):
-            return True
+        event_type = str(tr.get("eventType", "")).lower()
+        entered_by = str(tr.get("enteredBy", "")).lower()
+        automatic = bool(tr.get("automatic", False))
 
-        if is_bolus_or_correction_event(tr):
-            return True
+        carbs = tr.get("carbs")
+        insulin = tr.get("insulin")
+        amount = tr.get("amount")
 
-    return False
+        if isinstance(carbs, (int, float)) and carbs >= 5:
+            carb_events.append(tr)
+
+        # Ignore temp basal for missed meal/carb detection.
+        if "temp basal" in event_type:
+            if isinstance(amount, (int, float)) and amount > 0:
+                automatic_insulin_events.append(tr)
+            continue
+
+        is_meaningful = False
+
+        if "meal bolus" in event_type:
+            is_meaningful = True
+        elif "carb correction" in event_type:
+            is_meaningful = True
+        elif "correction bolus" in event_type:
+            # Tiny automatic corrections should not hide missed meal/carb alerts.
+            if not automatic:
+                is_meaningful = True
+            elif isinstance(insulin, (int, float)) and insulin >= 0.5:
+                is_meaningful = True
+        elif "bolus" in event_type and not automatic:
+            is_meaningful = True
+        elif isinstance(insulin, (int, float)) and insulin >= 0.5 and not automatic:
+            is_meaningful = True
+
+        if is_meaningful:
+            meaningful_bolus_events.append(tr)
+        else:
+            if isinstance(insulin, (int, float)) and insulin > 0:
+                automatic_insulin_events.append(tr)
+            elif isinstance(amount, (int, float)) and amount > 0:
+                automatic_insulin_events.append(tr)
+
+    return {
+        "carb_events": carb_events,
+        "meaningful_bolus_events": meaningful_bolus_events,
+        "automatic_insulin_events": automatic_insulin_events,
+    }
 
 
 def linear_regression_slope(points):
@@ -777,14 +1114,16 @@ def rise_consistency_score(points):
     return ok / total if total else 0.0
 
 
-def detect_missing_bolus(entries, treatments, reference_time):
+def detect_missing_bolus(entries, treatments, reference_time, cob=None):
     """
-    User-defined missing bolus logic:
+    Possible missed carb / missed bolus detection:
 
-    - BG steadily increased over previous 1 hour.
-    - No carbs registered in previous 1 hour.
-    - No bolus/correction insulin registered in previous 1 hour.
-    - Ignore Loop automatic Temp Basal.
+    - BG rising steadily over previous 45–60 min.
+    - Current BG high enough.
+    - No carb entry.
+    - No meaningful meal/correction/manual bolus.
+    - COB is 0 or low.
+    - Ignore Loop Temp Basal and tiny automatic events.
     """
     end_time = reference_time.astimezone(timezone.utc)
     start_time = end_time - timedelta(minutes=MISSING_BOLUS_LOOKBACK_MIN)
@@ -805,10 +1144,12 @@ def detect_missing_bolus(entries, treatments, reference_time):
     points.sort(key=lambda x: x[0])
 
     if len(points) < MISSING_BOLUS_MIN_POINTS:
+        print(f"Missing bolus debug: no alert; not enough CGM points: {len(points)}")
         return None
 
     duration_min = (points[-1][0] - points[0][0]).total_seconds() / 60
     if duration_min < MISSING_BOLUS_MIN_DURATION:
+        print(f"Missing bolus debug: no alert; duration too short: {duration_min:.1f} min")
         return None
 
     start_bg = points[0][1]
@@ -817,19 +1158,51 @@ def detect_missing_bolus(entries, treatments, reference_time):
     slope = linear_regression_slope(points)
     consistency = rise_consistency_score(points)
 
+    summary = get_recent_carb_and_bolus_summary(
+        treatments,
+        reference_time,
+        lookback_min=MISSING_BOLUS_LOOKBACK_MIN,
+    )
+
+    carb_count = len(summary["carb_events"])
+    meaningful_bolus_count = len(summary["meaningful_bolus_events"])
+    automatic_insulin_count = len(summary["automatic_insulin_events"])
+
+    print(
+        "Missing bolus debug: "
+        f"start_bg={start_bg:.0f}, current_bg={current_bg:.0f}, "
+        f"net_rise={net_rise:.0f}, duration={duration_min:.0f}min, "
+        f"slope={slope:.2f}, consistency={consistency:.2f}, "
+        f"COB={cob}, carbs={carb_count}, meaningful_bolus={meaningful_bolus_count}, "
+        f"automatic_insulin_events={automatic_insulin_count}"
+    )
+
     if current_bg < MISSING_BOLUS_MIN_CURRENT_BG:
+        print("Missing bolus debug: no alert; current BG below threshold")
         return None
 
     if net_rise < MISSING_BOLUS_MIN_RISE:
+        print("Missing bolus debug: no alert; net rise below threshold")
         return None
 
     if slope < MISSING_BOLUS_MIN_SLOPE:
+        print("Missing bolus debug: no alert; slope below threshold")
         return None
 
-    if consistency < 0.75:
+    if consistency < 0.70:
+        print("Missing bolus debug: no alert; rise not consistent enough")
         return None
 
-    if has_carb_or_bolus_in_last_hour(treatments, reference_time):
+    if isinstance(cob, (int, float)) and cob > 5:
+        print("Missing bolus debug: no alert; COB exists")
+        return None
+
+    if carb_count > 0:
+        print("Missing bolus debug: no alert; carb event found")
+        return None
+
+    if meaningful_bolus_count > 0:
+        print("Missing bolus debug: no alert; meaningful bolus/correction found")
         return None
 
     return {
@@ -840,11 +1213,14 @@ def detect_missing_bolus(entries, treatments, reference_time):
         "slope": slope,
         "consistency": consistency,
         "points": len(points),
+        "carb_count": carb_count,
+        "meaningful_bolus_count": meaningful_bolus_count,
+        "automatic_insulin_count": automatic_insulin_count,
     }
 
 
 # ============================================================
-# Device age alerts
+# Device age / insulin alerts
 # ============================================================
 
 def check_pod_age_alert(state, pod_start_time, pod_age_hours, pod_source):
@@ -992,245 +1368,6 @@ def check_pod_insulin_alert(
                 ),
             )
 
-def parse_ns_time_value(value):
-    """
-    Parse a direct timestamp string such as:
-      2026-07-01T11:53:01Z
-    """
-    if not value:
-        return None
-
-    if isinstance(value, str):
-        try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
-        except Exception:
-            return None
-
-    return None
-
-
-def minutes_old(dt):
-    if not dt:
-        return None
-    return (datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds() / 60
-
-
-def get_latest_devicestatus_info(devicestatus):
-    """
-    Extract freshness/battery/loop/pump status from latest devicestatus.
-    """
-    if not devicestatus:
-        return {
-            "latest_dev": None,
-            "dev_created_at": None,
-            "dev_age_min": None,
-            "uploader_name": None,
-            "uploader_battery": None,
-            "uploader_timestamp": None,
-            "uploader_age_min": None,
-            "loop_timestamp": None,
-            "loop_age_min": None,
-            "pump_clock": None,
-            "pump_clock_age_min": None,
-            "pump_suspended": None,
-            "pump_bolusing": None,
-            "pump_id": None,
-            "pump_model": None,
-        }
-
-    latest_dev = devicestatus[0]
-
-    dev_created_at = parse_ns_time(latest_dev)
-    dev_age_min = minutes_old(dev_created_at)
-
-    uploader = latest_dev.get("uploader", {}) or {}
-    uploader_timestamp = parse_ns_time_value(uploader.get("timestamp"))
-    uploader_age_min = minutes_old(uploader_timestamp)
-    uploader_battery = uploader.get("battery")
-
-    loop = latest_dev.get("loop", {}) or {}
-    loop_timestamp = parse_ns_time_value(loop.get("timestamp"))
-    loop_age_min = minutes_old(loop_timestamp)
-
-    pump = latest_dev.get("pump", {}) or {}
-    pump_clock = parse_ns_time_value(pump.get("clock"))
-    pump_clock_age_min = minutes_old(pump_clock)
-
-    return {
-        "latest_dev": latest_dev,
-        "dev_created_at": dev_created_at,
-        "dev_age_min": dev_age_min,
-        "uploader_name": uploader.get("name"),
-        "uploader_battery": uploader_battery,
-        "uploader_timestamp": uploader_timestamp,
-        "uploader_age_min": uploader_age_min,
-        "loop_timestamp": loop_timestamp,
-        "loop_age_min": loop_age_min,
-        "pump_clock": pump_clock,
-        "pump_clock_age_min": pump_clock_age_min,
-        "pump_suspended": pump.get("suspended"),
-        "pump_bolusing": pump.get("bolusing"),
-        "pump_id": pump.get("pumpID"),
-        "pump_model": pump.get("model"),
-    }
-
-
-def check_loop_and_device_health(state, dev_info, latest_cgm_time):
-    """
-    Monitor:
-    - Nightscout devicestatus stale
-    - Loop stopped / stale
-    - uploader phone battery low
-    - pump clock stale
-    - pump suspended
-    """
-
-    dev_age = dev_info.get("dev_age_min")
-    loop_age = dev_info.get("loop_age_min")
-    uploader_age = dev_info.get("uploader_age_min")
-    pump_clock_age = dev_info.get("pump_clock_age_min")
-    uploader_battery = dev_info.get("uploader_battery")
-    pump_suspended = dev_info.get("pump_suspended")
-
-    # 1. No devicestatus / devicestatus stale
-    if dev_age is None:
-        if can_send(state, "devicestatus_missing", 30):
-            alert_parent(
-                "Julie Nightscout devicestatus missing",
-                (
-                    f"Nightscout returned no usable devicestatus.\n\n"
-                    f"CGM last update: {fmt_local(latest_cgm_time)}\n"
-                    f"Nightscout: {NS_URL}\n\n"
-                    f"Please check Loop/Nightscout uploader."
-                ),
-            )
-    elif dev_age > DEVICESTATUS_STALE_MINUTES:
-        if can_send(state, "devicestatus_stale", 30):
-            alert_both(
-                "Julie Loop/Nightscout status may be stale",
-                (
-                    f"Julie, Loop/Nightscout status may not be updating.\n\n"
-                    f"Last Loop status upload: {fmt_local(dev_info.get('dev_created_at'))}\n"
-                    f"Age: {dev_age:.0f} minutes\n\n"
-                    f"Please check Loop app, phone internet, and Nightscout upload."
-                ),
-                (
-                    f"Julie devicestatus stale.\n"
-                    f"Last devicestatus: {fmt_local(dev_info.get('dev_created_at'))}\n"
-                    f"Age: {dev_age:.1f} minutes\n"
-                    f"Uploader: {dev_info.get('uploader_name')}\n"
-                    f"Uploader battery: {uploader_battery}\n"
-                    f"Loop timestamp: {fmt_local(dev_info.get('loop_timestamp'))}\n"
-                    f"Pump clock: {fmt_local(dev_info.get('pump_clock'))}\n"
-                    f"Nightscout: {NS_URL}"
-                ),
-            )
-
-    # 2. Loop stale
-    if loop_age is None:
-        if can_send(state, "loop_timestamp_missing", 30):
-            alert_parent(
-                "Julie Loop timestamp missing",
-                (
-                    f"Latest devicestatus does not include loop.timestamp.\n\n"
-                    f"This may mean Loop data is not uploading correctly.\n"
-                    f"Nightscout: {NS_URL}"
-                ),
-            )
-    elif loop_age > LOOP_STALE_MINUTES:
-        if can_send(state, "loop_stale", 20):
-            alert_both(
-                "Julie Loop may have stopped updating",
-                (
-                    f"Julie, Loop may not be updating.\n\n"
-                    f"Last Loop timestamp: {fmt_local(dev_info.get('loop_timestamp'))}\n"
-                    f"Age: {loop_age:.0f} minutes\n\n"
-                    f"Please open Loop and check that it is running."
-                ),
-                (
-                    f"Julie Loop stale alert.\n"
-                    f"Last Loop timestamp: {fmt_local(dev_info.get('loop_timestamp'))}\n"
-                    f"Loop age: {loop_age:.1f} minutes\n"
-                    f"Devicestatus age: {dev_age}\n"
-                    f"Uploader battery: {uploader_battery}\n"
-                    f"Nightscout: {NS_URL}"
-                ),
-            )
-
-    # 3. Uploader battery low
-    if isinstance(uploader_battery, (int, float)):
-        if uploader_battery <= UPLOADER_BATTERY_URGENT:
-            if can_send(state, "uploader_battery_urgent", 60):
-                alert_both(
-                    f"Julie phone battery very low: {uploader_battery:.0f}%",
-                    (
-                        f"Julie, your Loop uploader phone battery appears very low: {uploader_battery:.0f}%.\n\n"
-                        f"Please charge it so Dexcom/Loop/Nightscout can keep working."
-                    ),
-                    (
-                        f"Julie uploader battery urgent.\n"
-                        f"Battery: {uploader_battery:.0f}%\n"
-                        f"Uploader timestamp: {fmt_local(dev_info.get('uploader_timestamp'))}\n"
-                        f"Uploader age: {uploader_age}\n"
-                        f"Nightscout: {NS_URL}"
-                    ),
-                )
-
-        elif uploader_battery <= UPLOADER_BATTERY_WARN:
-            if can_send(state, "uploader_battery_warn", 180):
-                alert_both(
-                    f"Julie phone battery low: {uploader_battery:.0f}%",
-                    (
-                        f"Julie, your Loop uploader phone battery is low: {uploader_battery:.0f}%.\n\n"
-                        f"Please charge it when convenient."
-                    ),
-                    (
-                        f"Julie uploader battery low.\n"
-                        f"Battery: {uploader_battery:.0f}%\n"
-                        f"Uploader timestamp: {fmt_local(dev_info.get('uploader_timestamp'))}\n"
-                        f"Nightscout: {NS_URL}"
-                    ),
-                )
-
-    # 4. Pump clock stale / pump communication may be stale
-    if pump_clock_age is not None and pump_clock_age > PUMP_CLOCK_STALE_MINUTES:
-        if can_send(state, "pump_clock_stale", 30):
-            alert_both(
-                "Julie pump communication may be stale",
-                (
-                    f"Julie, pump communication may be stale.\n\n"
-                    f"Last pump clock: {fmt_local(dev_info.get('pump_clock'))}\n"
-                    f"Age: {pump_clock_age:.0f} minutes\n\n"
-                    f"Please check Loop/Pod communication."
-                ),
-                (
-                    f"Julie pump clock stale.\n"
-                    f"Pump clock: {fmt_local(dev_info.get('pump_clock'))}\n"
-                    f"Pump clock age: {pump_clock_age:.1f} minutes\n"
-                    f"Pump model: {dev_info.get('pump_model')}\n"
-                    f"Pump ID: {dev_info.get('pump_id')}\n"
-                    f"Nightscout: {NS_URL}"
-                ),
-            )
-
-    # 5. Pump suspended
-    if pump_suspended is True:
-        if can_send(state, "pump_suspended", 15):
-            alert_both(
-                "URGENT: Julie pump appears suspended",
-                (
-                    f"Julie, Nightscout shows the pump may be suspended.\n\n"
-                    f"Please check Loop/Pod immediately."
-                ),
-                (
-                    f"Julie pump suspended alert.\n"
-                    f"Pump suspended: {pump_suspended}\n"
-                    f"Pump model: {dev_info.get('pump_model')}\n"
-                    f"Pump ID: {dev_info.get('pump_id')}\n"
-                    f"Pump clock: {fmt_local(dev_info.get('pump_clock'))}\n"
-                    f"Nightscout: {NS_URL}"
-                ),
-            )
 
 # ============================================================
 # Main
@@ -1329,15 +1466,15 @@ def main():
     if age_min > STALE_MINUTES:
         if can_send(state, "stale_data", 20):
             alert_both(
-                "Julie Nightscout data stale",
+                "Julie Dexcom/CGM data stale",
                 (
-                    f"Julie, Nightscout/Dexcom data may be stale.\n\n"
+                    f"Julie, Dexcom/CGM data may be stale.\n\n"
                     f"Last CGM update: {fmt_local(latest_time)}\n"
                     f"Age: {age_min} minutes\n\n"
-		    f"Please check Dexcom, Bluetooth, Loop, and Nightscout upload."
+                    f"Please check Dexcom, Bluetooth, Loop, and Nightscout upload."
                 ),
                 (
-                    f"Julie Nightscout data may be stale.\n"
+                    f"Julie Dexcom/CGM data may be stale.\n"
                     f"Last CGM update: {fmt_local(latest_time)}\n"
                     f"Age: {age_min} minutes\n"
                     f"Nightscout: {NS_URL}"
@@ -1352,7 +1489,7 @@ def main():
 
     dev_info = get_latest_devicestatus_info(devicestatus)
     check_loop_and_device_health(state, dev_info, latest_time)
-    
+
     # ------------------------------------------------------------
     # Loop prediction / IOB / COB
     # ------------------------------------------------------------
@@ -1400,7 +1537,7 @@ def main():
             insulin_source = "unknown"
 
     # ------------------------------------------------------------
-    # Device age alerts
+    # Device age and insulin alerts
     # ------------------------------------------------------------
 
     check_pod_age_alert(state, pod_start_time, pod_age_hours, pod_source)
@@ -1519,32 +1656,33 @@ def main():
             )
 
     # ------------------------------------------------------------
-    # 5. Missing bolus: steady rise + no carbs + no bolus
+    # 5. Missing carb / bolus: steady rise + no carbs + no meaningful bolus
     # ------------------------------------------------------------
 
-    missing = detect_missing_bolus(entries, treatments, latest_time)
+    missing = detect_missing_bolus(entries, treatments, latest_time, cob=cob)
 
     if missing:
         if can_send(state, "missing_bolus_steady_rise", 60):
             alert_both(
-                "Julie possible missed bolus",
+                "Julie possible missed carb/bolus",
                 (
-                    f"Julie, your BG has been steadily rising for about 1 hour, "
-                    f"and Nightscout does not show carbs or a recent bolus/correction.\n\n"
+                    f"Julie, your BG has been rising and Nightscout does not show recent carbs "
+                    f"or a meaningful bolus/correction.\n\n"
                     f"Start BG: {missing['start_bg']:.0f}\n"
                     f"Current BG: {missing['current_bg']:.0f} {direction}\n"
                     f"Rise: +{missing['net_rise']:.0f} mg/dL over {missing['duration_min']:.0f} min\n\n"
                     f"Please check Loop and make sure food/bolus was entered if needed."
                 ),
                 (
-                    f"Julie possible missed bolus detected.\n"
-                    f"Reason: steady BG rise over previous hour with no carb or bolus/correction treatment.\n\n"
+                    f"Julie possible missed carb/bolus detected.\n"
+                    f"Reason: steady BG rise with no carb entry and no meaningful bolus/correction.\n\n"
                     f"Start BG: {missing['start_bg']:.0f}\n"
                     f"Current BG: {missing['current_bg']:.0f} {direction}\n"
                     f"Rise: +{missing['net_rise']:.0f} mg/dL\n"
                     f"Duration: {missing['duration_min']:.0f} min\n"
                     f"Slope: {missing['slope']:.2f} mg/dL/min\n"
                     f"Consistency: {missing['consistency']:.2f}\n"
+                    f"Automatic insulin events ignored: {missing['automatic_insulin_count']}\n"
                     f"IOB: {iob}\n"
                     f"COB: {cob}\n"
                     f"Nightscout: {NS_URL}"
@@ -1568,6 +1706,17 @@ def main():
     print(f"Predicted 60-min low: {min_pred_60}")
     print(f"Predicted 90-min high: {max_pred_90}")
 
+    print(f"Devicestatus age: {dev_info.get('dev_age_min')}")
+    print(f"Uploader: {dev_info.get('uploader_name')}")
+    print(f"Uploader battery: {dev_info.get('uploader_battery')}")
+    print(f"Uploader age: {dev_info.get('uploader_age_min')}")
+    print(f"Loop timestamp: {fmt_local(dev_info.get('loop_timestamp')) if dev_info.get('loop_timestamp') else None}")
+    print(f"Loop age: {dev_info.get('loop_age_min')}")
+    print(f"Pump clock: {fmt_local(dev_info.get('pump_clock')) if dev_info.get('pump_clock') else None}")
+    print(f"Pump clock age: {dev_info.get('pump_clock_age_min')}")
+    print(f"Pump suspended: {dev_info.get('pump_suspended')}")
+    print(f"Pump bolusing: {dev_info.get('pump_bolusing')}")
+
     print(f"Pod start: {fmt_local(pod_start_time) if pod_start_time else None}")
     print(f"Pod source: {pod_source}")
     print(f"Pod age: {pod_age_hours:.1f}h / {fmt_hours_as_age(pod_age_hours) if pod_age_hours is not None else None}")
@@ -1582,16 +1731,7 @@ def main():
     print(f"Estimated remaining insulin: {estimated_remaining}")
     print(f"Insulin left used by alert logic: {insulin_left}")
     print(f"Insulin source: {insulin_source}")
-    print(f"Devicestatus age: {dev_info.get('dev_age_min')}")
-    print(f"Uploader: {dev_info.get('uploader_name')}")
-    print(f"Uploader battery: {dev_info.get('uploader_battery')}")
-    print(f"Uploader age: {dev_info.get('uploader_age_min')}")
-    print(f"Loop timestamp: {fmt_local(dev_info.get('loop_timestamp')) if dev_info.get('loop_timestamp') else None}")
-    print(f"Loop age: {dev_info.get('loop_age_min')}")
-    print(f"Pump clock: {fmt_local(dev_info.get('pump_clock')) if dev_info.get('pump_clock') else None}")
-    print(f"Pump clock age: {dev_info.get('pump_clock_age_min')}")
-    print(f"Pump suspended: {dev_info.get('pump_suspended')}")
-    print(f"Pump bolusing: {dev_info.get('pump_bolusing')}")
+
 
 if __name__ == "__main__":
     try:
