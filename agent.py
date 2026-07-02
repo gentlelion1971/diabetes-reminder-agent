@@ -1604,7 +1604,20 @@ def main():
     # ------------------------------------------------------------
 
     if isinstance(bg, (int, float)) and bg >= HIGH_NOW:
-        if can_send(state, "high_now", 45):
+        high_key = "high_now"
+        high_cooldown = 45
+
+       # If BG is high and still rising, remind more frequently.
+        if bg >= HIGH_NOW and str(direction) in {"SingleUp", "DoubleUp", "FortyFiveUp"}:
+            high_key = "high_now_rising"
+            high_cooldown = 20
+
+        # If very high, use shorter cooldown even if trend text is not recognized.
+        if bg >= 300:
+            high_key = "very_high_now"
+            high_cooldown = 15
+
+        if can_send(state, high_key, high_cooldown):
             alert_both(
                 f"Julie high BG {bg}",
                 (
